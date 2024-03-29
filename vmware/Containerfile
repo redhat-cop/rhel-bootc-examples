@@ -1,0 +1,7 @@
+FROM quay.io/centos-bootc/centos-bootc:stream9
+
+# Copy our custom configuration in /etc/vmware-tools/tools.conf
+COPY etc/ /etc/
+RUN dnf -y install open-vm-tools && \
+    dnf clean all && \
+    systemctl enable vmtoolsd.service

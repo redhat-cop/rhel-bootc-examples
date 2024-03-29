@@ -1,0 +1,20 @@
+FROM quay.io/centos-bootc/centos-bootc:stream9
+COPY etc/ /etc/
+
+# install required packages and enable services
+RUN dnf -y install \
+        WALinuxAgent \
+        cloud-init \
+        cloud-utils-growpart \
+        gdisk \
+        hyperv-daemons && \
+    dnf clean all && \
+    systemctl enable NetworkManager.service && \
+    systemctl enable waagent.service && \
+    systemctl enable cloud-init.service && \
+    echo 'ClientAliveInterval 180' >> /etc/ssh/sshd_config
+
+# configure waagent for cloud-init to handle provisioning
+RUN sed -i 's/Provisioning.Agent=auto/Provisioning.Agent=cloud-init/g' /etc/waagent.conf && \
+    sed -i 's/ResourceDisk.Format=y/ResourceDisk.Format=n/g' /etc/waagent.conf && \
+    sed -i 's/ResourceDisk.EnableSwap=y/ResourceDisk.EnableSwap=n/g' /etc/waagent.conf
