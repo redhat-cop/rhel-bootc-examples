@@ -1,4 +1,4 @@
-FROM quay.io/centos-bootc/centos-bootc:stream9
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
 COPY etc/ /etc/
 
 # install required packages and enable services

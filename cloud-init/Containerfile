@@ -1,9 +1,14 @@
-# This image contains cloud-init, which makes it usable out of the box
-# for e.g. a pre-generated AWS or KVM guest system.
-FROM quay.io/centos-bootc/centos-bootc:stream9
+# This image demonstrates installing cloud-init on top of the base image.
+# Some workflows in particular will want to at least support fetching e.g.
+# SSH keys from the hypervisor metadata, and also cloud-init can be
+# a useful way to inject secrets from the instance metadata, instead
+# of including it in container images.
+# However, cloud-init type functionality is not included in the base image
+# because some systems will want to run in an "immutable infrastructure"
+# fashion instead, e.g. fully turning off SSH even.
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
 
 RUN dnf -y install cloud-init && \
     ln -s ../cloud-init.target /usr/lib/systemd/system/default.target.wants && \
     rm -rf /var/{cache,log} /var/lib/{dnf,rhsm}
-COPY usr/ /usr/
 

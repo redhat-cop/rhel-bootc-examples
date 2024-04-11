@@ -1,4 +1,4 @@
-FROM quay.io/centos-bootc/centos-bootc:stream9
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
 
 # Copy our custom configuration in /etc/vmware-tools/tools.conf
 COPY etc/ /etc/

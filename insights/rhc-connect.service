@@ -1,0 +1,21 @@
+[Unit]
+Description=Run rhc connect at boot
+After=network-online.target
+ConditionPathExists=/etc/rhc/.run_rhc_connect_next_boot
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/rhc/.rhc_connect_credentials
+ExecStart=/usr/bin/rhc connect --activation-key ${RHC_ACT_KEY} --organization ${RHC_ORG_ID}
+Restart=no
+WatchdogSec=900
+CPUQuota=30%
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=300
+BlockIOWeight=100
+ExecStartPre=/bin/rm -f /etc/rhc/.run_rhc_connect_next_boot
+ExecStop=/bin/rm -f /etc/rhc/.rhc_connect_credentials
+
+[Install]
+WantedBy=multi-user.target

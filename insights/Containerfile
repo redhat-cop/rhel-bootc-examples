@@ -1,0 +1,12 @@
+FROM registry-proxy.engineering.redhat.com/rh-osbs/rhel9-rhel_bootc:rhel-9.4
+
+RUN dnf install rhc rhc-worker-playbook -y
+
+# If you want the system to auto register to insights on first boot, uncomment
+# the next three statements and populate the .rhc_connect_credentials file
+# with an activation key and organization id.
+# See https://console.redhat.com/insights/connector/activation-keys
+
+# COPY rhc-connect.service /usr/lib/systemd/system/rhc-connect.service
+# COPY .rhc_connect_credentials /etc/rhc/.rhc_connect_credentials
+# RUN systemctl enable rhc-connect && touch /etc/rhc/.run_rhc_connect_next_boot

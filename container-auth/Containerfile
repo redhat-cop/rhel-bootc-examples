@@ -1,0 +1,16 @@
+# This example expects a secret named "creds" to contain
+# the registry pull secret.  To build, use e.g. 
+# podman build --secret id=creds,src=$HOME/.docker/config.json ...
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
+# Use a single pull secret for bootc and podman by symlinking both locations
+# to a common persistent file embedded in the container image.
+#
+# NOTE: In this example, /usr/lib/container-auth.json is a made-up location.
+#
+# There is some discussion of a centralized authentication file in
+# https://github.com/containers/image/pull/1746
+#
+COPY containers-auth.conf /usr/lib/tmpfiles.d/link-podman-credentials.conf
+RUN --mount=type=secret,id=creds,required=true cp /run/secrets/creds /usr/lib/container-auth.json && \
+    chmod 0600 /usr/lib/container-auth.json && \
+    ln -sr /usr/lib/container-auth.json /etc/ostree/auth.json 
