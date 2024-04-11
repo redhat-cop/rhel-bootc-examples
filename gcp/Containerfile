@@ -1,0 +1,16 @@
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
+# Inject our configuration; the etc/ contains yum.repos.d files for the google-cloud external
+# yum repository.
+COPY etc /etc/
+# This directory injects console= kernel arguments, but is commented
+# out right now as there is a plan to make this more generic, see
+# https://github.com/containers/bootc/issues/470
+#COPY usr /usr/
+# Note that we don't install osconfig-agent, which conceptually
+# clashes with what we're doing here in managing the OS as a container.
+# 
+# google-compute-engine tries to regenerate the initramfs in %post,
+# but that's unnecessary because we already ship the nvme driver
+# in the initramfs in C9S/RHEL9.
+# https://github.com/GoogleCloudPlatform/guest-configs/blob/b0fbc3b6ec49f0f6406beb3cf05d157ee141f447/packaging/google-compute-engine.spec#L87
+RUN dnf -y install google-compute-engine && dnf clean all
