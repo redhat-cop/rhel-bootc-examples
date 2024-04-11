@@ -1,4 +1,4 @@
-FROM registry-proxy.engineering.redhat.com/rh-osbs/rhel9-rhel_bootc:rhel-9.4
+FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
 
 RUN dnf install rhc rhc-worker-playbook -y
 
