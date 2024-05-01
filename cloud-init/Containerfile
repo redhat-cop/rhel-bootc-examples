@@ -6,7 +6,7 @@
 # However, cloud-init type functionality is not included in the base image
 # because some systems will want to run in an "immutable infrastructure"
 # fashion instead, e.g. fully turning off SSH even.
-FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
+FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 
 RUN dnf -y install cloud-init && \
     ln -s ../cloud-init.target /usr/lib/systemd/system/default.target.wants && \
