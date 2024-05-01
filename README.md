@@ -2,7 +2,7 @@
 
 Welcome to the examples repository for RHEL bootc!
 
-The `registry.redhat.io/rhel9-beta/rhel-bootc:9.4` container image
+The `registry.redhat.io/rhel9/rhel-bootc:9.4` container image
 represents a new mechanism to configure Red Hat Enterprise Linux.
 
 You can define your systems via a container build, generate
@@ -42,10 +42,6 @@ As a result, this example repository focuses on two things:
   for `bootc` and `podman` different, and there are some subtleties in the `podman`
   location; this writes a pull secret to a central location embedded in the container
   (underneath `/usr` as part of the immutable state).
-- [included-ssh-pubkey](included-ssh-pubkey) - Configure OpenSSH to find keys
-  in `/usr/ssh/` in addition to `~/.ssh`, and inject a key for the `root` user.
-  Similar to the above, the `/usr` state is fixed in the image and immutable at
-  runtime, in contrast to user home directories.
 
 ### Cloud and virtualization
 

@@ -1,7 +1,7 @@
 # This example expects a secret named "creds" to contain
 # the registry pull secret.  To build, use e.g. 
 # podman build --secret id=creds,src=$HOME/.docker/config.json ...
-FROM registry.redhat.io/rhel9-beta/rhel-bootc:9.4
+FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 # Use a single pull secret for bootc and podman by symlinking both locations
 # to a common persistent file embedded in the container image.
 #
