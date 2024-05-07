@@ -48,3 +48,8 @@ As a result, this example repository focuses on two things:
 - [aws, kubevirt, openstack](cloud-init) - these all simply add cloud-init,
   which many use cases (but not all) will want.
 - [vmware](vmware) - Usage of this agent is often required.
+
+## More examples
+
+There are more community-contributed examples available in the [upstream Fedora-bootc project](https://gitlab.com/fedora/bootc/examples).
+
