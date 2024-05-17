@@ -1,0 +1,6 @@
+# This includes cloud-init plus qemu-guest-agent, which kubevirt also
+# prefers to have.
+FROM registry.redhat.io/rhel9/rhel-bootc:9.4
+RUN dnf -y install cloud-init qemu-guest-agent && \
+    ln -s ../cloud-init.target /usr/lib/systemd/system/default.target.wants && \
+    dnf clean all
