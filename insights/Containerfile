@@ -1,6 +1,6 @@
 FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 
-RUN dnf install rhc rhc-worker-playbook -y
+RUN dnf install rhc rhc-worker-playbook -y && dnf clean all
 
 # If you want the system to auto register to insights on first boot, uncomment
 # the next three statements and populate the .rhc_connect_credentials file
