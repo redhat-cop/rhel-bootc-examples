@@ -1,5 +1,6 @@
 FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 COPY etc/ /etc/
+COPY usr/ usr/
 
 # install required packages and enable services
 RUN dnf -y install \
