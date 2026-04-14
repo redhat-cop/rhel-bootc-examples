@@ -1,0 +1,94 @@
+# Justfile for sealed composefs UKI boot
+#
+# Builds a CentOS Stream 10 bootc host that boots with the composefs
+# backend (UKI + composefs digest + Secure Boot).
+#
+# Prerequisites: podman, openssl, just
+# For VM testing: bcvk (from bootc-dev/bcvk), virt-firmware (pip)
+
+# Local image name
+host_image := "localhost/sealed-host:latest"
+
+# Key material directory (for local dev; CI uses secrets)
+keys_dir := justfile_directory() + "/target/keys"
+
+# Generate Secure Boot keys (PK/KEK for enrollment, db for signing).
+# Copies db.crt into keys/ for committing to the repo.
+keygen:
+    #!/bin/bash
+    set -euo pipefail
+    python3 util/keys.py generate --output-dir "{{keys_dir}}"
+    mkdir -p keys/
+    cp "{{keys_dir}}/sb-db.crt" keys/db.crt
+    echo "keys/db.crt updated — commit it to the repo"
+
+# Build the sealed host image (composefs backend with signed UKI).
+# Only the db private key is a secret; db.crt is in the build context.
+build-host:
+    #!/bin/bash
+    set -euo pipefail
+    if [ ! -f "{{keys_dir}}/sb-db.key" ]; then
+        echo "No keys found. Run 'just keygen' first."
+        exit 1
+    fi
+    podman build \
+        --secret id=secureboot_key,src="{{keys_dir}}/sb-db.key" \
+        -t "{{host_image}}" .
+    echo "Host image built: {{host_image}}"
+
+# Boot a VM with the composefs backend and verify.
+bcvk-ssh: build-host
+    #!/bin/bash
+    set -euo pipefail
+
+    VM_NAME="sealed-demo"
+
+    # Clean up any previous VM with this name
+    bcvk libvirt rm --stop --force "${VM_NAME}" 2>/dev/null || true
+
+    echo "==> Booting sealed host VM..."
+    bcvk libvirt run --detach --ssh-wait --name "${VM_NAME}" \
+        --filesystem=ext4 \
+        --secure-boot-keys "{{keys_dir}}" \
+        "{{host_image}}"
+
+    echo "==> Waiting for multi-user.target (timeout 120s)..."
+    bcvk libvirt ssh "${VM_NAME}" -- \
+        timeout 120 bash -c \
+            'systemctl is-active multi-user.target || journalctl -b --no-pager -o cat UNIT=multi-user.target --follow | grep -q -m1 "Reached target"'
+
+    echo "==> multi-user.target reached, running checks..."
+    bcvk libvirt ssh "${VM_NAME}" -- bash -c '
+        set -euo pipefail
+
+        echo "--- kernel ---"
+        uname -r
+
+        echo "--- root mount ---"
+        mount | grep " / " || true
+        if mount | grep -q "verity=require"; then
+            echo "  OK: composefs root with verity=require"
+        else
+            echo "  FAIL: composefs root not detected"
+            exit 1
+        fi
+
+        echo "--- cmdline ---"
+        cat /proc/cmdline
+
+        echo ""
+        echo "=== COMPOSEFS BOOT VERIFIED ==="
+    '
+
+    echo "==> Cleaning up VM..."
+    bcvk libvirt rm --stop --force "${VM_NAME}"
+    echo "Done."
+
+# Clean generated artifacts and VM
+clean:
+    #!/bin/bash
+    set -euo pipefail
+    bcvk libvirt rm --stop --force sealed-demo 2>/dev/null || true
+    rm -rf target/
+    podman rmi -f "{{host_image}}" 2>/dev/null || true
+    echo "Cleaned"
