@@ -33,11 +33,13 @@ build-host:
     fi
     podman build \
         --secret id=secureboot_key,src="{{keys_dir}}/sb-db.key" \
+        --secret id=secureboot_cert,src=keys/db.crt \
         -t "{{host_image}}" .
     echo "Host image built: {{host_image}}"
 
-# Boot a VM with the composefs backend and verify.
-bcvk-ssh: build-host
+# Internal: boot the VM (used by bcvk-ssh and bcvk-test).
+[private]
+bcvk-boot: build-host
     #!/bin/bash
     set -euo pipefail
 
@@ -57,7 +59,24 @@ bcvk-ssh: build-host
         timeout 120 bash -c \
             'systemctl is-active multi-user.target || journalctl -b --no-pager -o cat UNIT=multi-user.target --follow | grep -q -m1 "Reached target"'
 
-    echo "==> multi-user.target reached, running checks..."
+    echo "==> multi-user.target reached."
+
+# Boot a VM and open an interactive SSH session.
+bcvk-ssh: bcvk-boot
+    #!/bin/bash
+    set -euo pipefail
+    VM_NAME="sealed-demo"
+    bcvk libvirt ssh "${VM_NAME}"
+
+# Boot a VM, verify composefs, and tear down.
+bcvk-test: bcvk-boot
+    #!/bin/bash
+    set -euo pipefail
+
+    VM_NAME="sealed-demo"
+    trap 'echo "==> Cleaning up VM..."; bcvk libvirt rm --stop --force "${VM_NAME}"; echo "Done."' EXIT
+
+    echo "==> Running checks..."
     bcvk libvirt ssh "${VM_NAME}" -- bash -c '
         set -euo pipefail
 
@@ -79,10 +98,6 @@ bcvk-ssh: build-host
         echo ""
         echo "=== COMPOSEFS BOOT VERIFIED ==="
     '
-
-    echo "==> Cleaning up VM..."
-    bcvk libvirt rm --stop --force "${VM_NAME}"
-    echo "Done."
 
 # Clean generated artifacts and VM
 clean:

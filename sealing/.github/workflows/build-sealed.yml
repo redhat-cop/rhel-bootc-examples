@@ -54,6 +54,7 @@ jobs:
         run: |
           podman build \
             --secret id=secureboot_key,src=/tmp/keys/sb-db.key \
+            --secret id=secureboot_cert,src=keys/db.crt \
             -t localhost/sealed-host:latest .
 
       - name: Log in to GHCR
