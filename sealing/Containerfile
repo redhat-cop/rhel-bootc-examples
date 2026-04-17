@@ -5,12 +5,15 @@
 # digest; Secure Boot verifies the UKI, which in turn verifies every
 # file on the root filesystem via fs-verity.
 #
-# The db certificate (public) is read from the build context.
-# Only the db private key is a build secret.
+# Both the db private key and the db certificate are passed as build
+# secrets.  The cert is public, but using a secret mount avoids
+# SELinux label mismatches on bind-mounted host files and keeps the
+# cert out of any image layer.
 #
 # Build:
 #   podman build \
 #     --secret id=secureboot_key,src=target/keys/sb-db.key \
+#     --secret id=secureboot_cert,src=keys/db.crt \
 #     -t localhost/sealed-host:latest .
 
 # --- Stage: rootfs-builder (install packages on the bootc base) ---
@@ -34,24 +37,13 @@ RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
 type = "ext4"
 EOF
 
-# Include the bootc dracut module in the initramfs so that composefs
-# root setup happens during boot (the module's check() returns 255,
-# meaning it's never auto-included). Then rebuild the initramfs.
-RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    mkdir -p /etc/dracut.conf.d && \
-    echo 'add_dracutmodules+=" bootc "' > /etc/dracut.conf.d/50-bootc-composefs.conf && \
-    kver=$(ls /usr/lib/modules/) && \
-    dracut --force --kver "$kver" /usr/lib/modules/$kver/initramfs.img && \
-    echo "Rebuilt initramfs with bootc module" && \
-    lsinitrd /usr/lib/modules/$kver/initramfs.img | grep -c bootc
-
 # Sign systemd-boot with our Secure Boot key so UEFI firmware will load it.
 # This must happen BEFORE the flatten so the signed binary is in the digest.
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=secret,id=secureboot_key \
-    --mount=type=bind,source=keys/db.crt,target=/tmp/db.crt \
+    --mount=type=secret,id=secureboot_cert \
     sbsign --key /run/secrets/secureboot_key \
-           --cert /tmp/db.crt \
+           --cert /run/secrets/secureboot_cert \
            --output /tmp/systemd-bootx64.efi.signed \
            /usr/lib/systemd/boot/efi/systemd-bootx64.efi && \
     mv /tmp/systemd-bootx64.efi.signed /usr/lib/systemd/boot/efi/systemd-bootx64.efi
@@ -70,18 +62,17 @@ FROM base AS kernel
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,from=base,target=/target \
     --mount=type=secret,id=secureboot_key \
-    --mount=type=bind,source=keys/db.crt,target=/tmp/db.crt <<EORUN
+    --mount=type=secret,id=secureboot_cert <<EORUN
 set -xeuo pipefail
 mkdir -p /out
 bootc container ukify --rootfs /target \
   --karg rw \
-  --karg enforcing=0 \
   --karg console=hvc0,115200 \
   --karg systemd.journald.forward_to_console=1 \
   -- \
   --signtool sbsign \
   --secureboot-private-key /run/secrets/secureboot_key \
-  --secureboot-certificate /tmp/db.crt \
+  --secureboot-certificate /run/secrets/secureboot_cert \
   --output /out/uki.efi
 ls -lh /out/
 EORUN
