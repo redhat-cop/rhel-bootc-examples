@@ -12,6 +12,8 @@ composefs digest of the root filesystem. At boot:
 Note that this support is currently experimental! But we are interested
 in feedback.
 
+> [NOTE] Setting UEFI variables for `libvirt` requires `virt-fw-vars` found in `virt-firmware` Python library. You can add this however it's packaged for your host distribution eg `python3-virt-firmware` in Fedora.
+
 ## Quick start with bcvk
 
 ### 1. Generate Secure Boot keys
