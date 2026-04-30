@@ -90,8 +90,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
-          dnf -y install podman just
+          dnf -y install podman
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
       - name: Build ${{ matrix.example }}
         run: just build ${{ matrix.example }}
