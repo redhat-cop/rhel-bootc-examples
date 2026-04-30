@@ -90,8 +90,9 @@ jobs:
 
       - name: Install build tools
         run: |
-          dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
-          dnf -y install podman just
+          dnf -y install podman
+          curl -fsSL https://github.com/casey/just/releases/download/1.40.0/just-1.40.0-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /usr/local/bin just
 
       - name: Log in to registry.redhat.io
         env:
