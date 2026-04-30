@@ -23,23 +23,31 @@ keygen:
     echo "keys/db.crt updated — commit it to the repo"
 
 # Build the sealed host image (composefs backend with signed UKI).
-# Only the db private key is a secret; db.crt is in the build context.
-build-host:
+# If no persistent key exists under target/keys/, an ephemeral key+cert pair
+# is generated automatically (suitable for CI and local smoke-testing).
+build:
     #!/bin/bash
     set -euo pipefail
-    if [ ! -f "{{keys_dir}}/sb-db.key" ]; then
-        echo "No keys found. Run 'just keygen' first."
-        exit 1
+    KEY="{{keys_dir}}/sb-db.key"
+    CERT="keys/db.crt"
+
+    if [ ! -f "${KEY}" ]; then
+        echo "No persistent key found — generating ephemeral key+cert for this build."
+        mkdir -p "{{keys_dir}}"
+        openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "${KEY}" -out "${CERT}" \
+            -days 1 -subj '/CN=bootc-ci-ephemeral/'
     fi
+
     podman build \
-        --secret id=secureboot_key,src="{{keys_dir}}/sb-db.key" \
-        --secret id=secureboot_cert,src=keys/db.crt \
+        --secret id=secureboot_key,src="${KEY}" \
+        --secret id=secureboot_cert,src="${CERT}" \
         -t "{{host_image}}" .
     echo "Host image built: {{host_image}}"
 
 # Internal: boot the VM (used by bcvk-ssh and bcvk-test).
 [private]
-bcvk-boot: build-host
+bcvk-boot: build
     #!/bin/bash
     set -euo pipefail
 

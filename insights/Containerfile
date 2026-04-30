@@ -1,4 +1,4 @@
-FROM registry.redhat.io/rhel9/rhel-bootc:9.4
+FROM registry.redhat.io/rhel10/rhel-bootc:10.1
 
 RUN dnf install rhc rhc-worker-playbook -y
 

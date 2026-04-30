@@ -1,0 +1,11 @@
+# Build the container-auth example.
+# A dummy empty credentials file is used so the build succeeds without
+# real registry auth embedded; in real use pass your own pull secret:
+#   podman build --secret id=creds,src=$HOME/.docker/config.json ...
+build:
+    #!/bin/bash
+    set -euo pipefail
+    dummy=$(mktemp)
+    echo '{}' > "${dummy}"
+    trap 'rm -f "${dummy}"' EXIT
+    podman build --secret id=creds,src="${dummy}" -t localhost/container-auth:latest .
