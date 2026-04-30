@@ -89,7 +89,9 @@ jobs:
         run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
 
       - name: Install build tools
-        run: dnf -y install epel-release && dnf -y install podman just
+        run: |
+          dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+          dnf -y install podman just
 
       - name: Build ${{ matrix.example }}
         run: just build ${{ matrix.example }}
