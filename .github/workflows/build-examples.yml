@@ -85,11 +85,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: dnf -y install podman just
-
       - name: Register subscription
         run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
+
+      - name: Install build tools
+        run: dnf -y install epel-release && dnf -y install podman just
 
       - name: Build ${{ matrix.example }}
         run: just build ${{ matrix.example }}
