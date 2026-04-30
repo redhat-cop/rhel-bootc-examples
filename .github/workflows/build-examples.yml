@@ -88,13 +88,13 @@ jobs:
       - name: Register subscription
         run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
 
-      - name: Log in to registry.redhat.io
-        run: podman login registry.redhat.io -u ${{ secrets.SOURCE_REGISTRY_USER }} -p ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
-
       - name: Install build tools
         run: |
           dnf -y install podman
           curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+
+      - name: Log in to registry.redhat.io
+        run: podman login registry.redhat.io -u ${{ secrets.SOURCE_REGISTRY_USER }} -p ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
 
       - name: Build ${{ matrix.example }}
         run: just build ${{ matrix.example }}
