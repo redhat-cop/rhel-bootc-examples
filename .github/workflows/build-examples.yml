@@ -94,7 +94,10 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
       - name: Log in to registry.redhat.io
-        run: podman login registry.redhat.io -u ${{ secrets.SOURCE_REGISTRY_USER }} -p ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+        env:
+          SOURCE_REGISTRY_USER: ${{ secrets.SOURCE_REGISTRY_USER }}
+          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+        run: echo "${SOURCE_REGISTRY_PASSWORD}" | podman login registry.redhat.io -u "${SOURCE_REGISTRY_USER}" --password-stdin
 
       - name: Build ${{ matrix.example }}
         run: just build ${{ matrix.example }}
