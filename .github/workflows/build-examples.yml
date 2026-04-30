@@ -88,6 +88,9 @@ jobs:
       - name: Register subscription
         run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
 
+      - name: Log in to registry.redhat.io
+        run: podman login registry.redhat.io -u ${{ secrets.SOURCE_REGISTRY_USER }} -p ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+
       - name: Install build tools
         run: |
           dnf -y install podman
