@@ -1,0 +1,99 @@
+name: Build examples
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find changed examples (PR only)
+        if: github.event_name == 'pull_request'
+        id: changed
+        uses: tj-actions/changed-files@v46
+        with:
+          dir_names: true
+          dir_names_max_depth: 1
+          files_ignore: .github/**
+
+      - name: Build matrix
+        id: set-matrix
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ steps.changed.outputs.all_changed_files }}
+          WORKFLOW_CHANGED: ${{ contains(steps.changed.outputs.all_changed_files, '.github') }}
+        run: |
+          set -euo pipefail
+
+          # Collect all examples (top-level dirs with a Containerfile),
+          # excluding sealing (uses CentOS Stream, handled by its own workflow)
+          all=()
+          for d in */; do
+            name="${d%/}"
+            [ -f "$d/Containerfile" ] || continue
+            [ "$name" = "sealing" ] && continue
+            all+=("$name")
+          done
+
+          if [[ "${EVENT}" == "pull_request" && "${WORKFLOW_CHANGED}" != "true" ]]; then
+            examples=()
+            for name in ${CHANGED}; do
+              for ex in "${all[@]}"; do
+                [[ "${name}" == "${ex}" ]] && examples+=("${ex}")
+              done
+            done
+          else
+            examples=("${all[@]}")
+          fi
+
+          if [[ ${#examples[@]} -eq 0 ]]; then
+            echo "No examples to build."
+            echo 'matrix=[]' >> "${GITHUB_OUTPUT}"
+          else
+            json=$(printf '%s\n' "${examples[@]}" | jq -Rcs '[split("\n")[] | select(length>0)]')
+            echo "matrix=${json}" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: ${{ fromJson(needs.discover.outputs.matrix) }}
+    name: build / ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    container:
+      image: registry.access.redhat.com/ubi9/ubi
+      options: --privileged
+    env:
+      SMDEV_CONTAINER_OFF: 1
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: dnf -y install podman just
+
+      - name: Register subscription
+        run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
+
+      - name: Build ${{ matrix.example }}
+        run: just build ${{ matrix.example }}
+
+      - name: Unregister subscription
+        if: always()
+        run: subscription-manager unregister

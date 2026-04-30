@@ -1,4 +1,4 @@
-FROM registry.redhat.io/rhel9/rhel-bootc:9.4
+FROM registry.redhat.io/rhel10/rhel-bootc:10.1
 
 # Copy our custom configuration in /etc/vmware-tools/tools.conf
 COPY etc/ /etc/

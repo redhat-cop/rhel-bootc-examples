@@ -1,4 +1,4 @@
-FROM registry.redhat.io/rhel9/rhel-bootc:9.4
+FROM registry.redhat.io/rhel10/rhel-bootc:10.1
 # Inject our configuration; the etc/ contains yum.repos.d files for the google-cloud external
 # yum repository.
 COPY etc /etc/
