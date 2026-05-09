@@ -1,6 +1,6 @@
 # Justfile for sealed composefs UKI boot
 #
-# Builds a CentOS Stream 10 bootc host that boots with the composefs
+# Builds a RHEL 10 bootc host that boots with the composefs
 # backend (UKI + composefs digest + Secure Boot).
 #
 # Prerequisites: podman, openssl, just
@@ -39,7 +39,10 @@ build:
             -days 1 -subj '/CN=bootc-ci-ephemeral/'
     fi
 
+    # build-rootfs runs `rpm-ostree compose` under bwrap, which needs extra
+    # capabilities and /dev/fuse. The composefs/UKI build also uses fuse.
     podman build \
+        --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
         --secret id=secureboot_key,src="${KEY}" \
         --secret id=secureboot_cert,src="${CERT}" \
         -t "{{host_image}}" .
@@ -56,18 +59,11 @@ bcvk-boot: build
     # Clean up any previous VM with this name
     bcvk libvirt rm --stop --force "${VM_NAME}" 2>/dev/null || true
 
-    echo "==> Booting sealed host VM..."
-    bcvk libvirt run --detach --ssh-wait --name "${VM_NAME}" \
+    set -x
+    bcvk libvirt run  --name "${VM_NAME}" \
         --filesystem=ext4 \
         --secure-boot-keys "{{keys_dir}}" \
         "{{host_image}}"
-
-    echo "==> Waiting for multi-user.target (timeout 120s)..."
-    bcvk libvirt ssh "${VM_NAME}" -- \
-        timeout 120 bash -c \
-            'systemctl is-active multi-user.target || journalctl -b --no-pager -o cat UNIT=multi-user.target --follow | grep -q -m1 "Reached target"'
-
-    echo "==> multi-user.target reached."
 
 # Boot a VM and open an interactive SSH session.
 bcvk-ssh: bcvk-boot
