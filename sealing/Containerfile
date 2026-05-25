@@ -39,9 +39,13 @@ EOF
 
 # Sign systemd-boot with our Secure Boot key so UEFI firmware will load it.
 # This must happen BEFORE the flatten so the signed binary is in the digest.
+# Build secrets do not invalidate container build cache, so include a public
+# certificate hash as an ARG to force re-signing when the signing key changes.
+ARG secureboot_cert_sha=
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=secret,id=secureboot_key \
     --mount=type=secret,id=secureboot_cert \
+    echo "Secure Boot cert sha: ${secureboot_cert_sha}" && \
     sbsign --key /run/secrets/secureboot_key \
            --cert /run/secrets/secureboot_cert \
            --output /tmp/systemd-bootx64.efi.signed \
@@ -51,36 +55,74 @@ RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
 # --- Stage: base (flatten to single layer for deterministic digests) ---
 FROM scratch AS base
 COPY --from=rootfs-builder / /
-LABEL containers.bootc 1
-LABEL ostree.bootable 1
+LABEL containers.bootc=1
+LABEL ostree.bootable=1
 ENV container=oci
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
 
-# --- Stage: kernel (compute digest + build signed UKI) ---
-FROM base AS kernel
+# --- Stage: final-rootfs (the exact rootfs that the UKI seals) ---
+#
+# The composefs digest embedded in the UKI must be computed from the same
+# rootfs that bootc will install.  If this image is derived from a previous UKI
+# image, remove any existing UKIs before computing the new digest; bootc
+# container ukify intentionally refuses to seal a rootfs that already contains
+# one.
+FROM base AS final-rootfs
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    --mount=type=bind,from=base,target=/target \
+    rm -rf /boot/EFI/Linux/*.efi
+
+# --- Stage: kernel (build signed UKI) ---
+#
+# When composefs_digest is provided, it must be the install-time composefs
+# digest computed from container storage for the final-rootfs image.  That is
+# the digest bootc validates during install.  If omitted, fall back to bootc
+# container ukify's mounted-rootfs digest, which is useful for debugging but can
+# differ from the install-time OCI/storage view.
+FROM final-rootfs AS kernel
+ARG composefs_digest=
+ARG secureboot_cert_sha=
+RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    --mount=type=bind,from=final-rootfs,target=/target \
     --mount=type=secret,id=secureboot_key \
     --mount=type=secret,id=secureboot_cert <<EORUN
 set -xeuo pipefail
+echo "Secure Boot cert sha: ${secureboot_cert_sha}"
 mkdir -p /out
-bootc container ukify --rootfs /target \
-  --karg rw \
-  --karg console=hvc0,115200 \
-  --karg systemd.journald.forward_to_console=1 \
-  -- \
-  --signtool sbsign \
-  --secureboot-private-key /run/secrets/secureboot_key \
-  --secureboot-certificate /run/secrets/secureboot_cert \
-  --output /out/uki.efi
+if [ -n "${composefs_digest}" ]; then
+  kver=$(bootc container inspect --rootfs /target --json | jq -r '.kernel.version')
+  ukify build \
+    --linux "/target/usr/lib/modules/${kver}/vmlinuz" \
+    --initrd "/target/usr/lib/modules/${kver}/initramfs.img" \
+    --uname "${kver}" \
+    --cmdline "composefs=${composefs_digest} rw console=hvc0,115200 systemd.journald.forward_to_console=1" \
+    --os-release "@/target/usr/lib/os-release" \
+    --signtool sbsign \
+    --secureboot-private-key /run/secrets/secureboot_key \
+    --secureboot-certificate /run/secrets/secureboot_cert \
+    --output /out/uki.efi
+else
+  bootc container ukify --rootfs /target \
+    --karg rw \
+    --karg console=hvc0,115200 \
+    --karg systemd.journald.forward_to_console=1 \
+    -- \
+    --signtool sbsign \
+    --secureboot-private-key /run/secrets/secureboot_key \
+    --secureboot-certificate /run/secrets/secureboot_cert \
+    --output /out/uki.efi
+fi
 ls -lh /out/
 EORUN
+
+# --- Final image: final-rootfs + sealed UKI in /boot ---
+# /boot is outside the composefs-verified root, so installing the UKI here after
+# computing the digest does not change the composefs= value that bootc expects.
+# Use a bind mount rather than COPY-to-/tmp plus mv so the final layer only adds
+# the /boot artifact; it does not create and whiteout a temporary rootfs file.
+FROM final-rootfs
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    --mount=type=bind,from=kernel,src=/out,target=/run/sealed-uki \
     kver=$(bootc container inspect --json | jq -r '.kernel.version') && \
     mkdir -p /boot/EFI/Linux && \
-    mv /out/uki.efi "/boot/EFI/Linux/${kver}.efi"
-
-# --- Final image: base rootfs + /boot from kernel stage ---
-FROM base
-COPY --from=kernel /boot /boot
+    cp /run/sealed-uki/uki.efi "/boot/EFI/Linux/${kver}.efi"

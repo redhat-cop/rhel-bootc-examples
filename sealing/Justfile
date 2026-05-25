@@ -8,6 +8,7 @@
 
 # Local image name
 host_image := "localhost/sealed-host:latest"
+rootfs_image := "localhost/sealed-host:rootfs"
 
 # Key material directory (for local dev; CI uses secrets)
 keys_dir := justfile_directory() + "/target/keys"
@@ -29,17 +30,45 @@ build:
     #!/bin/bash
     set -euo pipefail
     KEY="{{keys_dir}}/sb-db.key"
-    CERT="keys/db.crt"
+    CERT="{{keys_dir}}/sb-db.crt"
 
-    if [ ! -f "${KEY}" ]; then
-        echo "No persistent key found — generating ephemeral key+cert for this build."
-        mkdir -p "{{keys_dir}}"
-        openssl req -x509 -newkey rsa:2048 -nodes \
-            -keyout "${KEY}" -out "${CERT}" \
-            -days 1 -subj '/CN=bootc-ci-ephemeral/'
+    if [ ! -f "${KEY}" ] || [ ! -f "${CERT}" ] || [ ! -f "{{keys_dir}}/PK.crt" ] || [ ! -f "{{keys_dir}}/KEK.crt" ]; then
+        echo "No complete Secure Boot key set found — generating one."
+        python3 util/keys.py generate --output-dir "{{keys_dir}}"
     fi
 
+    # Keep the public db certificate in the repo in sync with the private key
+    # used for signing.  bcvk enrolls {{keys_dir}}/db.crt into OVMF, so signing
+    # with a stale keys/db.crt can produce binaries rejected by Secure Boot.
+    mkdir -p keys/
+    cp "${CERT}" keys/db.crt
+    SECUREBOOT_CERT_SHA=$(sha256sum "${CERT}" | awk '{print $1}')
+
+    echo "==> Building rootfs image used for install-time composefs digest..."
     podman build \
+        --target final-rootfs \
+        --build-arg secureboot_cert_sha="${SECUREBOOT_CERT_SHA}" \
+        --secret id=secureboot_key,src="${KEY}" \
+        --secret id=secureboot_cert,src="${CERT}" \
+        -t "{{rootfs_image}}" .
+
+    echo "==> Computing install-time composefs digest from container storage..."
+    GRAPHROOT=$(podman system info --format json | jq -r '.store.graphRoot')
+    # With no image argument, bootc uses the running container's image ID and
+    # looks it up through /run/host-container-storage.  This matches bootc's
+    # own validation helper and avoids tag/raw-ID parsing issues.
+    COMPOSEFS_DIGEST=$(podman run --rm --privileged \
+        --security-opt=label=disable \
+        -v "${GRAPHROOT}:/run/host-container-storage:ro" \
+        --tmpfs=/var \
+        "{{rootfs_image}}" \
+        bootc container compute-composefs-digest-from-storage | tail -n1)
+    echo "composefs digest: ${COMPOSEFS_DIGEST}"
+
+    echo "==> Building final sealed image..."
+    podman build \
+        --build-arg composefs_digest="${COMPOSEFS_DIGEST}" \
+        --build-arg secureboot_cert_sha="${SECUREBOOT_CERT_SHA}" \
         --secret id=secureboot_key,src="${KEY}" \
         --secret id=secureboot_cert,src="${CERT}" \
         -t "{{host_image}}" .
@@ -53,8 +82,11 @@ bcvk-boot: build
 
     VM_NAME="sealed-demo"
 
-    # Clean up any previous VM with this name
+    # Clean up any previous VM with this name.  Also remove any stale custom
+    # OVMF vars file; bcvk reuses it if present, which can leave old db keys
+    # enrolled after regenerating signing keys.
     bcvk libvirt rm --stop --force "${VM_NAME}" 2>/dev/null || true
+    rm -f "${HOME}/.local/share/libvirt/images/${VM_NAME}_OVMF_VARS.fd"
 
     echo "==> Booting sealed host VM..."
     bcvk libvirt run --detach --ssh-wait --name "${VM_NAME}" \
@@ -113,5 +145,5 @@ clean:
     set -euo pipefail
     bcvk libvirt rm --stop --force sealed-demo 2>/dev/null || true
     rm -rf target/
-    podman rmi -f "{{host_image}}" 2>/dev/null || true
+    podman rmi -f "{{host_image}}" "{{rootfs_image}}" 2>/dev/null || true
     echo "Cleaned"
