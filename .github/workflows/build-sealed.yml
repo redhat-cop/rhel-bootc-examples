@@ -1,0 +1,80 @@
+name: Build sealed composefs host
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sealing/**'
+  pull_request:
+    paths:
+      - 'sealing/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  HOST_IMAGE: ghcr.io/${{ github.repository }}/sealed-host
+
+defaults:
+  run:
+    working-directory: sealing
+
+jobs:
+  build:
+    name: Build sealed host
+    runs-on: ubuntu-latest
+    container:
+      image: registry.access.redhat.com/ubi10/ubi
+      options: --privileged --volume /var
+    env:
+      SMDEV_CONTAINER_OFF: 1
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Register subscription
+        run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
+
+      - name: Install build tools
+        run: |
+          dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+          dnf -y install podman just openssl
+
+      - name: Log in to registry.redhat.io
+        env:
+          SOURCE_REGISTRY_USER: ${{ secrets.SOURCE_REGISTRY_USER }}
+          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+        run: echo "${SOURCE_REGISTRY_PASSWORD}" | podman login registry.redhat.io -u "${SOURCE_REGISTRY_USER}" --password-stdin
+
+      # For push builds with a real key, place it where the Justfile expects it.
+      # For PRs (no secret) the Justfile generates an ephemeral key+cert itself.
+      - name: Write db private key (push builds only)
+        if: env.SECUREBOOT_DB_KEY != ''
+        env:
+          SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
+        run: |
+          mkdir -p target/keys
+          printenv SECUREBOOT_DB_KEY > target/keys/sb-db.key
+
+      - name: Build sealed host image
+        run: just build
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push host image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: podman push localhost/sealed-host:latest docker://${HOST_IMAGE}:latest
+
+      - name: Unregister subscription
+        if: always()
+        run: subscription-manager unregister
+
+      - name: Clean up keys
+        if: always()
+        run: rm -rf target/keys
