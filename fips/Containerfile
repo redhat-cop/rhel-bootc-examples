@@ -1,0 +1,8 @@
+FROM quay.io/centos-bootc/centos-bootc:stream9
+## Enable fips=1 kernel argument: https://containers.github.io/bootc/building/kernel-arguments.html
+COPY 01-fips.toml /usr/lib/bootc/kargs.d/
+# Enable the FIPS crypto policy
+RUN update-crypto-policies --no-reload --set FIPS
+# And that's it. The other tasks are already handled:
+# - FIPS dracut module is built-in to the base image
+# - We default to a boot=UUID= karg in bootc install-to-filesystem
