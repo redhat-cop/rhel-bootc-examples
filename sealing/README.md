@@ -1,15 +1,14 @@
 # Sealed composefs boot
 
-This example builds a CentOS Stream 10 bootc host that boots with the
-[bootc composefs backend](https://bootc.dev/bootc/experimental-composefs.html). A signed Unified Kernel Image (UKI) embeds the
-composefs digest of the root filesystem. At boot:
+This example builds a RHEL 10.2 Image Mode system that boots with the
+[bootc composefs backend](https://bootc.dev/bootc/experimental-composefs.html). A signed Unified Kernel Image (UKI) embeds the composefs digest of the root filesystem. At boot:
 
 1. UEFI Secure Boot verifies the UKI signature against enrolled keys
 2. The kernel starts with `composefs=<digest>` in the command line
 3. The initramfs mounts the root as a composefs overlay with `verity=require`
 4. Every file access is verified against its fs-verity digest
 
-Note that this support is currently experimental! But we are interested
+Note that this support is Tech Preview in RHEL 10.2. But we are interested
 in feedback.
 
 ## Quick start with bcvk
@@ -24,20 +23,24 @@ This generates PK, KEK, and db keypairs in `target/keys/` and copies
 `db.crt` into `keys/` for committing. PK and KEK are only used for
 firmware enrollment (bcvk handles this); db signs the boot artifacts.
 
+It's important to understand that it is *your* Secure Boot keys used to sign the entire boot chain, and that [shim](https://github.com/rhboot/shim) is not used by default.
+
 ### 2. Build and boot
 
 ```sh
 just bcvk-ssh
 ```
 
-This builds the host image and boots a VM with Secure Boot and the
-composefs backend. After boot (~3 min first time), it verifies that
-the root is a composefs overlay with `verity=require`.
+This single command builds the sealed container image and boots a VM with Secure Boot and the composefs backend.
 
 ### 3. Manual exploration
 
+The `Justfile` is a relatively straightforward wrapper for `podman build` to generate the container image, and `bcvk` to run it as a local VM.
+
+You can separate build and run steps:
+
 ```sh
-just build-host
+just build
 bcvk libvirt run --detach --ssh-wait --name sealed-demo \
     --secure-boot-keys target/keys \
     localhost/sealed-host:latest
