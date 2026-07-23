@@ -108,8 +108,9 @@ RUN --network=none \
     --mount=type=bind,from=boot-rpms,source=/rpms,target=/run/rpms \
     --mount=type=bind,from=boot-rpms,source=/etc/pki/rpm-gpg,target=/run/keys <<EORUN
 set -xeuo pipefail
-# We will use systemd-boot, so remove bootupd.
-rpm -e bootupd
+# We will use systemd-boot, so remove bootupd and shim (not needed: we sign
+# and boot the UKI directly with our own Secure Boot key, no shim chain).
+rpm -e bootupd shim-x64
 # Import the Red Hat signing keys up front: offline, dnf can't fetch them itself.
 rpm --import /run/keys/RPM-GPG-KEY-redhat-*
 # localpkg_gpgcheck enforces signatures on the local rpms (dnf leaves it off).
