@@ -39,6 +39,12 @@
 #     -t localhost/sealed-host:latest .
 
 ARG base=registry.redhat.io/rhel10/rhel-bootc:10.2
+# Extra packages to install into the sealed rootfs (space-separated).
+# Example: --build-arg extra_packages="cloud-init" for cloud images.
+ARG extra_packages=""
+# Kernel console argument(s) baked into the UKI.
+# Override for different platforms, e.g. --build-arg console_kargs="console=ttyS0,115200"
+ARG console_kargs="console=hvc0,115200"
 FROM ${base} as base
 
 # ---------------------------------------------------------------------------
@@ -49,8 +55,9 @@ FROM ${base} as base
 # the "implicit mtime on parent dirs" https://github.com/containers/composefs-rs/issues/132
 # issue.
 #
-# You may also want to use e.g. --install to add extra packages here.
+# Pass extra_packages via --install if set (e.g. cloud-init for cloud images).
 FROM base AS target-base
+ARG extra_packages
 # Workaround for https://github.com/coreos/rpm-ostree/pull/5597 (libdnf only
 # reads the first armor block from a key file). RHEL 10's
 # RPM-GPG-KEY-redhat-release contains three blocks (RSA, Ed448, ML-DSA);
@@ -66,7 +73,8 @@ for i, block in enumerate(blocks):
     (gpgdir / f"RPM-GPG-KEY-redhat-release-{i}").write_text(block + "\n")
 EOF
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    /usr/libexec/bootc-base-imagectl build-rootfs --manifest=standard /target-rootfs
+    /usr/libexec/bootc-base-imagectl build-rootfs --manifest=standard \
+    ${extra_packages:+--install $extra_packages} /target-rootfs
 
 # ---------------------------------------------------------------------------
 # Stage: boot-rpms — download the bootloader RPM that belongs in the final image
@@ -171,6 +179,7 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
 # FROM tools so ukify, sbsign, and all their deps are natively available.
 # The penultimate tree is mounted read-only; the sealer never modifies it.
 FROM tools AS sealer
+ARG console_kargs
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,from=penultimate,target=/target \
     --mount=type=secret,id=secureboot_key \
@@ -179,7 +188,7 @@ set -xeuo pipefail
 mkdir -p /out
 bootc container ukify --rootfs /target \
   --karg rw \
-  --karg console=hvc0,115200 \
+  --karg ${console_kargs} \
   --karg systemd.journald.forward_to_console=1 \
   -- \
   --signtool systemd-sbsign \

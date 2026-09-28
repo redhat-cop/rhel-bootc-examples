@@ -4,7 +4,9 @@
 # backend (UKI + composefs digest + Secure Boot).
 #
 # Prerequisites: podman, openssl, just
-# For VM testing: bcvk (from bootc-dev/bcvk), virt-firmware (pip)
+# For VM testing (local): bcvk (from bootc-dev/bcvk), virt-firmware (pip)
+# For AWS testing: aws CLI, jq, bcvk, efitools, python-uefivars
+#                  See README-AWS.md for full details.
 
 # Local image name
 host_image := "localhost/sealed-host:latest"
@@ -110,4 +112,605 @@ clean:
     bcvk libvirt rm --stop --force sealed-demo 2>/dev/null || true
     rm -rf target/
     podman rmi -f "{{host_image}}" 2>/dev/null || true
+    podman rmi -f "{{aws_host_image}}" 2>/dev/null || true
     echo "Cleaned"
+
+# ============================================================================
+# AWS testing
+# ============================================================================
+# See README-AWS.md for prerequisites and environment variables.
+#
+# Recipe chain:
+#   aws-test -> aws-launch -> aws-register -> aws-import -> aws-upload
+#                -> aws-disk -> aws-build -> _check-aws-deps
+#
+# Each step is idempotent: it checks for its output before doing work,
+# so re-running after a failure resumes from the failed step.
+
+# AWS-specific image (cloud-init, ttyS0 console)
+aws_host_image := "localhost/sealed-host-aws:latest"
+
+# State file tracking all created AWS resources for cleanup
+aws_state := justfile_directory() + "/target/aws-resources.json"
+
+# Default instance type (must support UEFI boot mode)
+aws_instance_type := env("AWS_INSTANCE_TYPE", "m5.large")
+
+# SSH user for cloud-init on RHEL (cloud-init defaults to cloud-user)
+aws_ssh_user := env("AWS_SSH_USER", "cloud-user")
+
+# Check that all AWS testing prerequisites are installed.
+[private]
+_check-aws-deps:
+    #!/bin/bash
+    set -euo pipefail
+    missing=()
+
+    for cmd in aws jq bcvk cert-to-efi-sig-list uefivars; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "ERROR: Missing required tools: ${missing[*]}" >&2
+        echo "" >&2
+        echo "Install them before running AWS tests:" >&2
+        for cmd in "${missing[@]}"; do
+            case "$cmd" in
+                aws)
+                    echo "  aws             - https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2 ;;
+                jq)
+                    echo "  jq              - dnf install jq" >&2 ;;
+                bcvk)
+                    echo "  bcvk            - https://github.com/bootc-dev/bcvk" >&2 ;;
+                cert-to-efi-sig-list)
+                    echo "  cert-to-efi-sig-list - dnf install efitools" >&2 ;;
+                uefivars)
+                    echo "  uefivars        - pip install git+https://github.com/awslabs/python-uefivars.git" >&2 ;;
+            esac
+        done
+        echo "" >&2
+        echo "See README-AWS.md for full details." >&2
+        exit 1
+    fi
+
+    # Verify AWS credentials are configured
+    if ! aws sts get-caller-identity &>/dev/null; then
+        echo "ERROR: AWS credentials not configured or expired." >&2
+        echo "Run 'aws configure' or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY." >&2
+        exit 1
+    fi
+
+    # Verify Secure Boot keys exist (needed for image signing + UEFI blob)
+    keys_missing=false
+    for f in PK.crt KEK.crt db.crt GUID.txt sb-db.key; do
+        if [ ! -f "{{keys_dir}}/$f" ]; then
+            keys_missing=true
+            break
+        fi
+    done
+    if [ "$keys_missing" = true ]; then
+        echo "ERROR: Required Secure Boot keys not found in {{keys_dir}}." >&2
+        echo "Run 'just keygen' first to generate the key hierarchy." >&2
+        exit 1
+    fi
+
+    echo "All AWS dependencies satisfied."
+
+# Helper: read a value from the AWS state file.
+[private]
+_aws-state-get key:
+    #!/bin/bash
+    set -euo pipefail
+    if [ -f "{{aws_state}}" ]; then
+        jq -r '.["{{key}}"] // empty' "{{aws_state}}"
+    fi
+
+# Helper: write a key/value to the AWS state file (creates if needed).
+[private]
+_aws-state-set key value:
+    #!/bin/bash
+    set -euo pipefail
+    mkdir -p "$(dirname "{{aws_state}}")"
+    if [ -f "{{aws_state}}" ]; then
+        jq --arg k "{{key}}" --arg v "{{value}}" '.[$k] = $v' "{{aws_state}}" > "{{aws_state}}.tmp"
+        mv "{{aws_state}}.tmp" "{{aws_state}}"
+    else
+        jq -n --arg k "{{key}}" --arg v "{{value}}" '{($k): $v}' > "{{aws_state}}"
+    fi
+
+# Build the AWS-specific sealed host image.
+# Uses ttyS0 for the serial console (EC2 x86_64) and includes cloud-init
+# for SSH key injection via EC2 instance metadata.
+# Keys must already exist (run 'just keygen' first; _check-aws-deps verifies).
+aws-build: _check-aws-deps
+    #!/bin/bash
+    set -euo pipefail
+    podman build \
+        --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
+        --secret id=secureboot_key,src="{{keys_dir}}/sb-db.key" \
+        --secret id=secureboot_cert,src="keys/db.crt" \
+        --build-arg console_kargs="console=ttyS0,115200" \
+        --build-arg extra_packages="cloud-init" \
+        -t "{{aws_host_image}}" .
+    echo "AWS host image built: {{aws_host_image}}"
+
+# Create a raw disk image from the AWS sealed host image.
+aws-disk: aws-build
+    #!/bin/bash
+    set -euo pipefail
+
+    DISK="target/aws-disk.raw"
+    if [ -f "$DISK" ]; then
+        echo "Disk image already exists: $DISK (skipping)"
+        exit 0
+    fi
+
+    echo "==> Creating raw disk image..."
+    mkdir -p target
+    bcvk to-disk --filesystem=ext4 --format=raw \
+        "{{aws_host_image}}" "$DISK"
+    echo "Disk image created: $DISK"
+
+# Upload the raw disk image to S3.
+aws-upload: aws-disk
+    #!/bin/bash
+    set -euo pipefail
+
+    DISK="target/aws-disk.raw"
+    S3_KEY="sealed-host.raw"
+    CREATED_BUCKET=""
+
+    # Determine the AWS region
+    REGION="${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}"
+    if [ -z "$REGION" ]; then
+        echo "ERROR: No AWS region configured. Set AWS_REGION or run 'aws configure'." >&2
+        exit 1
+    fi
+
+    # Check if we already uploaded (state file has s3_bucket and s3_key)
+    EXISTING_BUCKET=$(jq -r '.s3_bucket // empty' "{{aws_state}}" 2>/dev/null || true)
+    EXISTING_KEY=$(jq -r '.s3_key // empty' "{{aws_state}}" 2>/dev/null || true)
+    if [ -n "$EXISTING_BUCKET" ] && [ -n "$EXISTING_KEY" ]; then
+        if aws s3api head-object --bucket "$EXISTING_BUCKET" --key "$EXISTING_KEY" --region "$REGION" &>/dev/null; then
+            echo "S3 object already exists: s3://${EXISTING_BUCKET}/${EXISTING_KEY} (skipping)"
+            exit 0
+        fi
+    fi
+
+    # Determine the S3 bucket
+    BUCKET="${AWS_S3_BUCKET:-}"
+    if [ -z "$BUCKET" ]; then
+        BUCKET="sealed-bootc-test-$(head -c 8 /dev/urandom | xxd -p)"
+        echo "==> Creating ephemeral S3 bucket: $BUCKET"
+        if [ "$REGION" = "us-east-1" ]; then
+            aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"
+        else
+            aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+                --create-bucket-configuration LocationConstraint="$REGION"
+        fi
+        CREATED_BUCKET="true"
+    else
+        echo "==> Using provided S3 bucket: $BUCKET"
+        CREATED_BUCKET="false"
+    fi
+
+    # Record bucket info in state
+    just _aws-state-set s3_bucket "$BUCKET"
+    just _aws-state-set s3_key "$S3_KEY"
+    just _aws-state-set s3_bucket_created "$CREATED_BUCKET"
+    just _aws-state-set aws_region "$REGION"
+
+    # Grant the vmimport role access to the bucket so import-snapshot works.
+    ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+    echo "==> Applying bucket policy to allow vmimport role access..."
+    POLICY=$(cat <<EOPOLICY
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "AllowVMImportAccess",
+          "Effect": "Allow",
+          "Principal": {
+            "AWS": "arn:aws:iam::${ACCOUNT_ID}:role/vmimport"
+          },
+          "Action": [
+            "s3:GetObject",
+            "s3:GetBucketLocation"
+          ],
+          "Resource": [
+            "arn:aws:s3:::${BUCKET}",
+            "arn:aws:s3:::${BUCKET}/*"
+          ]
+        }
+      ]
+    }
+    EOPOLICY
+    )
+    if aws s3api put-bucket-policy --bucket "$BUCKET" --region "$REGION" \
+           --policy "$POLICY" 2>/dev/null; then
+        echo "  Bucket policy applied."
+    else
+        echo "  WARNING: Could not apply bucket policy (you may lack s3:PutBucketPolicy permission)." >&2
+        echo "  If using AWS_S3_BUCKET, ensure the vmimport role has access. See README-AWS.md." >&2
+    fi
+
+    echo "==> Uploading disk image to s3://${BUCKET}/${S3_KEY}..."
+    aws s3 cp "$DISK" "s3://${BUCKET}/${S3_KEY}" --region "$REGION"
+    echo "Upload complete."
+
+# Import the disk image from S3 as an EBS snapshot.
+aws-import: aws-upload
+    #!/bin/bash
+    set -euo pipefail
+
+    # Check if snapshot already exists in state
+    EXISTING_SNAP=$(jq -r '.snapshot_id // empty' "{{aws_state}}" 2>/dev/null || true)
+    if [ -n "$EXISTING_SNAP" ]; then
+        STATE=$(aws ec2 describe-snapshots --snapshot-ids "$EXISTING_SNAP" \
+            --query 'Snapshots[0].State' --output text 2>/dev/null || echo "missing")
+        if [ "$STATE" = "completed" ]; then
+            echo "Snapshot already exists: $EXISTING_SNAP (skipping)"
+            exit 0
+        elif [ "$STATE" = "pending" ]; then
+            echo "Snapshot $EXISTING_SNAP still pending, waiting..."
+            aws ec2 wait snapshot-completed --snapshot-ids "$EXISTING_SNAP"
+            echo "Snapshot ready: $EXISTING_SNAP"
+            exit 0
+        fi
+        # If missing or error, fall through to create a new one
+    fi
+
+    BUCKET=$(jq -r '.s3_bucket' "{{aws_state}}")
+    S3_KEY=$(jq -r '.s3_key' "{{aws_state}}")
+    REGION=$(jq -r '.aws_region' "{{aws_state}}")
+
+    # Ensure the vmimport role exists (we check, but don't create it)
+    if ! aws iam get-role --role-name vmimport &>/dev/null; then
+        echo "ERROR: IAM role 'vmimport' not found." >&2
+        echo "This role is required by AWS VM Import/Export." >&2
+        echo "See README-AWS.md for setup instructions." >&2
+        exit 1
+    fi
+
+    echo "==> Importing snapshot from s3://${BUCKET}/${S3_KEY}..."
+    IMPORT_TASK=$(aws ec2 import-snapshot \
+        --region "$REGION" \
+        --description "sealed-bootc-test" \
+        --disk-container "Format=RAW,UserBucket={S3Bucket=${BUCKET},S3Key=${S3_KEY}}" \
+        --output json)
+
+    TASK_ID=$(echo "$IMPORT_TASK" | jq -r '.ImportTaskId')
+    echo "Import task started: $TASK_ID"
+    just _aws-state-set import_task_id "$TASK_ID"
+
+    # Poll until complete
+    echo "Waiting for snapshot import to complete (this may take several minutes)..."
+    while true; do
+        STATUS_JSON=$(aws ec2 describe-import-snapshot-tasks \
+            --region "$REGION" \
+            --import-task-ids "$TASK_ID" \
+            --output json)
+        STATUS=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.Status')
+        PROGRESS=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.Progress // "0"')
+        STATUS_MSG=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.StatusMessage // ""')
+
+        case "$STATUS" in
+            completed)
+                SNAP_ID=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId')
+                echo "Snapshot import complete: $SNAP_ID"
+                just _aws-state-set snapshot_id "$SNAP_ID"
+                break
+                ;;
+            active)
+                echo "  Progress: ${PROGRESS}% - ${STATUS_MSG}"
+                sleep 15
+                ;;
+            *)
+                echo "ERROR: Import failed with status: $STATUS" >&2
+                echo "$STATUS_JSON" | jq '.' >&2
+                exit 1
+                ;;
+        esac
+    done
+
+# Register an AMI from the imported snapshot with UEFI Secure Boot keys.
+aws-register: aws-import
+    #!/bin/bash
+    set -euo pipefail
+
+    # Check if AMI already exists in state
+    EXISTING_AMI=$(jq -r '.ami_id // empty' "{{aws_state}}" 2>/dev/null || true)
+    if [ -n "$EXISTING_AMI" ]; then
+        STATE=$(aws ec2 describe-images --image-ids "$EXISTING_AMI" \
+            --query 'Images[0].State' --output text 2>/dev/null || echo "missing")
+        if [ "$STATE" = "available" ]; then
+            echo "AMI already exists: $EXISTING_AMI (skipping)"
+            exit 0
+        fi
+    fi
+
+    SNAP_ID=$(jq -r '.snapshot_id' "{{aws_state}}")
+    REGION=$(jq -r '.aws_region' "{{aws_state}}")
+
+    # Generate the UEFI variable store blob with our Secure Boot keys
+    UEFI_BLOB="target/uefi-data.bin"
+    if [ ! -f "$UEFI_BLOB" ]; then
+        echo "==> Generating UEFI variable store blob..."
+        bash util/aws-uefi-blob.sh "{{keys_dir}}" "$UEFI_BLOB"
+    fi
+
+    AMI_NAME="sealed-bootc-test-$(date +%Y%m%d-%H%M%S)"
+
+    echo "==> Registering AMI: $AMI_NAME"
+    AMI_ID=$(aws ec2 register-image \
+        --region "$REGION" \
+        --name "$AMI_NAME" \
+        --description "Sealed bootc host with composefs + UEFI Secure Boot" \
+        --architecture x86_64 \
+        --root-device-name /dev/sda1 \
+        --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${SNAP_ID},VolumeType=gp3,DeleteOnTermination=true}" \
+        --virtualization-type hvm \
+        --boot-mode uefi \
+        --uefi-data "$(cat "$UEFI_BLOB")" \
+        --ena-support \
+        --output text \
+        --query 'ImageId')
+
+    echo "AMI registered: $AMI_ID"
+    just _aws-state-set ami_id "$AMI_ID"
+    just _aws-state-set ami_name "$AMI_NAME"
+
+    # Wait for the AMI to become available
+    echo "Waiting for AMI to become available..."
+    aws ec2 wait image-available --region "$REGION" --image-ids "$AMI_ID"
+    echo "AMI ready: $AMI_ID"
+
+# Launch an EC2 instance from the registered AMI.
+aws-launch: aws-register
+    #!/bin/bash
+    set -euo pipefail
+
+    # Check if instance already exists and is running
+    EXISTING_INSTANCE=$(jq -r '.instance_id // empty' "{{aws_state}}" 2>/dev/null || true)
+    if [ -n "$EXISTING_INSTANCE" ]; then
+        STATE=$(aws ec2 describe-instances --instance-ids "$EXISTING_INSTANCE" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "missing")
+        if [ "$STATE" = "running" ]; then
+            echo "Instance already running: $EXISTING_INSTANCE (skipping)"
+            exit 0
+        fi
+    fi
+
+    AMI_ID=$(jq -r '.ami_id' "{{aws_state}}")
+    REGION=$(jq -r '.aws_region' "{{aws_state}}")
+
+    # --- SSH Key Pair ---
+    KEY_NAME="sealed-bootc-test-$(head -c 6 /dev/urandom | xxd -p)"
+    KEY_FILE="target/aws-ssh-key.pem"
+    echo "==> Creating EC2 key pair: $KEY_NAME"
+    aws ec2 create-key-pair \
+        --region "$REGION" \
+        --key-name "$KEY_NAME" \
+        --key-type ed25519 \
+        --query 'KeyMaterial' \
+        --output text > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+    just _aws-state-set key_name "$KEY_NAME"
+
+    # --- Security Group ---
+    SG_ID="${AWS_SECURITY_GROUP_ID:-}"
+    SG_CREATED="false"
+    if [ -z "$SG_ID" ]; then
+        # Find the default VPC
+        VPC_ID=$(aws ec2 describe-vpcs --region "$REGION" \
+            --filters "Name=is-default,Values=true" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+        if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            echo "ERROR: No default VPC found. Set AWS_SECURITY_GROUP_ID to use a specific security group." >&2
+            exit 1
+        fi
+
+        SG_NAME="sealed-bootc-test-$(head -c 6 /dev/urandom | xxd -p)"
+        echo "==> Creating ephemeral security group: $SG_NAME in VPC $VPC_ID"
+        SG_ID=$(aws ec2 create-security-group \
+            --region "$REGION" \
+            --group-name "$SG_NAME" \
+            --description "Temporary SG for sealed bootc AWS test" \
+            --vpc-id "$VPC_ID" \
+            --query 'GroupId' --output text)
+
+        # Allow SSH from anywhere (this is a short-lived test resource)
+        aws ec2 authorize-security-group-ingress \
+            --region "$REGION" \
+            --group-id "$SG_ID" \
+            --protocol tcp --port 22 --cidr 0.0.0.0/0
+        SG_CREATED="true"
+    fi
+    just _aws-state-set security_group_id "$SG_ID"
+    just _aws-state-set security_group_created "$SG_CREATED"
+
+    # --- Subnet ---
+    SUBNET_ID="${AWS_SUBNET_ID:-}"
+    if [ -z "$SUBNET_ID" ]; then
+        # Pick the first subnet in the default VPC
+        SUBNET_ID=$(aws ec2 describe-subnets --region "$REGION" \
+            --filters "Name=default-for-az,Values=true" \
+            --query 'Subnets[0].SubnetId' --output text 2>/dev/null || true)
+        if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "None" ]; then
+            echo "ERROR: No default subnet found. Set AWS_SUBNET_ID." >&2
+            exit 1
+        fi
+    fi
+
+    # --- Launch ---
+    echo "==> Launching EC2 instance (type={{aws_instance_type}}, AMI=$AMI_ID)..."
+    INSTANCE_ID=$(aws ec2 run-instances \
+        --region "$REGION" \
+        --image-id "$AMI_ID" \
+        --instance-type "{{aws_instance_type}}" \
+        --key-name "$KEY_NAME" \
+        --security-group-ids "$SG_ID" \
+        --subnet-id "$SUBNET_ID" \
+        --associate-public-ip-address \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=sealed-bootc-test}]" \
+        --query 'Instances[0].InstanceId' --output text)
+
+    echo "Instance launched: $INSTANCE_ID"
+    just _aws-state-set instance_id "$INSTANCE_ID"
+
+    # Wait for the instance to be running
+    echo "Waiting for instance to enter 'running' state..."
+    aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
+
+    # Get the public IP
+    PUBLIC_IP=$(aws ec2 describe-instances \
+        --region "$REGION" \
+        --instance-ids "$INSTANCE_ID" \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+    echo "Instance running at: $PUBLIC_IP"
+    just _aws-state-set public_ip "$PUBLIC_IP"
+
+    # Wait for SSH to become available
+    echo "Waiting for SSH to become available..."
+    for i in $(seq 1 60); do
+        if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+               -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+               -i "target/aws-ssh-key.pem" \
+               "{{aws_ssh_user}}@${PUBLIC_IP}" true 2>/dev/null; then
+            echo "SSH is ready."
+            exit 0
+        fi
+        echo "  Attempt $i/60: SSH not ready yet, retrying in 10s..."
+        sleep 10
+    done
+    echo "ERROR: SSH did not become available within 10 minutes." >&2
+    exit 1
+
+# Open an interactive SSH session to the running AWS instance.
+aws-ssh: aws-launch
+    #!/bin/bash
+    set -euo pipefail
+    PUBLIC_IP=$(jq -r '.public_ip' "{{aws_state}}")
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -i "target/aws-ssh-key.pem" \
+        "{{aws_ssh_user}}@${PUBLIC_IP}"
+
+# Boot an AWS instance, verify composefs, and tear down.
+aws-test: aws-launch
+    #!/bin/bash
+    set -euo pipefail
+
+    trap 'echo "==> Cleaning up AWS resources..."; just aws-clean; echo "Done."' EXIT
+
+    PUBLIC_IP=$(jq -r '.public_ip' "{{aws_state}}")
+    KEY_FILE="target/aws-ssh-key.pem"
+
+    echo "==> Running checks on ${PUBLIC_IP}..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -i "$KEY_FILE" \
+        "{{aws_ssh_user}}@${PUBLIC_IP}" bash -c '
+        set -euo pipefail
+
+        echo "--- kernel ---"
+        uname -r
+
+        echo "--- root mount ---"
+        mount | grep " / " || true
+        if mount | grep -q "verity=require"; then
+            echo "  OK: composefs root with verity=require"
+        else
+            echo "  FAIL: composefs root not detected"
+            exit 1
+        fi
+
+        echo "--- cmdline ---"
+        cat /proc/cmdline
+
+        echo ""
+        echo "=== COMPOSEFS BOOT VERIFIED (AWS) ==="
+    '
+
+# Tear down all AWS resources tracked in the state file.
+aws-clean:
+    #!/bin/bash
+    set -euo pipefail
+
+    STATE="{{aws_state}}"
+    if [ ! -f "$STATE" ]; then
+        echo "No AWS state file found — nothing to clean."
+        exit 0
+    fi
+
+    REGION=$(jq -r '.aws_region // empty' "$STATE")
+    if [ -z "$REGION" ]; then
+        echo "No region in state file — nothing to clean."
+        rm -f "$STATE"
+        exit 0
+    fi
+
+    echo "==> Cleaning up AWS resources..."
+
+    # 1. Terminate instance
+    INSTANCE_ID=$(jq -r '.instance_id // empty' "$STATE")
+    if [ -n "$INSTANCE_ID" ]; then
+        echo "  Terminating instance: $INSTANCE_ID"
+        aws ec2 terminate-instances --region "$REGION" --instance-ids "$INSTANCE_ID" 2>/dev/null || true
+        echo "  Waiting for instance to terminate..."
+        aws ec2 wait instance-terminated --region "$REGION" --instance-ids "$INSTANCE_ID" 2>/dev/null || true
+    fi
+
+    # 2. Deregister AMI
+    AMI_ID=$(jq -r '.ami_id // empty' "$STATE")
+    if [ -n "$AMI_ID" ]; then
+        echo "  Deregistering AMI: $AMI_ID"
+        aws ec2 deregister-image --region "$REGION" --image-id "$AMI_ID" 2>/dev/null || true
+    fi
+
+    # 3. Delete snapshot
+    SNAP_ID=$(jq -r '.snapshot_id // empty' "$STATE")
+    if [ -n "$SNAP_ID" ]; then
+        echo "  Deleting snapshot: $SNAP_ID"
+        aws ec2 delete-snapshot --region "$REGION" --snapshot-id "$SNAP_ID" 2>/dev/null || true
+    fi
+
+    # 4. Delete key pair
+    KEY_NAME=$(jq -r '.key_name // empty' "$STATE")
+    if [ -n "$KEY_NAME" ]; then
+        echo "  Deleting key pair: $KEY_NAME"
+        aws ec2 delete-key-pair --region "$REGION" --key-name "$KEY_NAME" 2>/dev/null || true
+    fi
+
+    # 5. Delete security group (only if we created it)
+    SG_CREATED=$(jq -r '.security_group_created // "false"' "$STATE")
+    SG_ID=$(jq -r '.security_group_id // empty' "$STATE")
+    if [ "$SG_CREATED" = "true" ] && [ -n "$SG_ID" ]; then
+        echo "  Deleting security group: $SG_ID"
+        # SG deletion may fail if the instance hasn't fully terminated; retry
+        for i in $(seq 1 6); do
+            if aws ec2 delete-security-group --region "$REGION" --group-id "$SG_ID" 2>/dev/null; then
+                break
+            fi
+            echo "    Retry $i/6: waiting for instance ENI to detach..."
+            sleep 10
+        done
+    fi
+
+    # 6. Delete S3 object and ephemeral bucket
+    S3_BUCKET=$(jq -r '.s3_bucket // empty' "$STATE")
+    S3_KEY=$(jq -r '.s3_key // empty' "$STATE")
+    if [ -n "$S3_BUCKET" ] && [ -n "$S3_KEY" ]; then
+        echo "  Deleting S3 object: s3://${S3_BUCKET}/${S3_KEY}"
+        aws s3 rm "s3://${S3_BUCKET}/${S3_KEY}" --region "$REGION" 2>/dev/null || true
+    fi
+    S3_CREATED=$(jq -r '.s3_bucket_created // "false"' "$STATE")
+    if [ "$S3_CREATED" = "true" ] && [ -n "$S3_BUCKET" ]; then
+        echo "  Deleting ephemeral S3 bucket: $S3_BUCKET"
+        aws s3 rb "s3://${S3_BUCKET}" --region "$REGION" 2>/dev/null || true
+    fi
+
+    # 7. Clean up local artifacts
+    rm -f target/aws-ssh-key.pem target/aws-disk.raw target/uefi-data.bin
+    rm -f "$STATE"
+    echo "AWS cleanup complete."
