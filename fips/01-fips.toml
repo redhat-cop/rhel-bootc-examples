@@ -1,0 +1,2 @@
+# Enable FIPS
+kargs = ["fips=1"]

@@ -57,6 +57,7 @@ As a result, this example repository focuses on two things:
 
 ### Systems configuration
 
+- [fips](fips) - Enable FIPS
 - [container-auth](container-auth) - Currently, authentication file locations
   for `bootc` and `podman` differ, and there are some subtleties in the `podman`
   location; this writes a pull secret to a central location embedded in the container
