@@ -90,6 +90,15 @@ Boot time (UEFI → systemd-boot → UKI → composefs)
 └── switch-root into composefs overlay
 ```
 
+## AWS testing
+
+See [README-AWS.md](README-AWS.md) for instructions on testing the sealed
+image on AWS EC2 with UEFI Secure Boot.  The short version:
+
+```sh
+just aws-test
+```
+
 ## Key management
 
 Only one secret: the Secure Boot db private key (`db.key`). Everything
