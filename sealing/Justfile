@@ -89,6 +89,16 @@ bcvk-test: bcvk-boot
     echo "--- kernel ---"
     uname -r
 
+    echo "--- secure boot ---"
+    SB_STATUS=$(bootctl status 2>/dev/null | grep -i "Secure Boot" | head -1 || true)
+    echo "  $SB_STATUS"
+    if echo "$SB_STATUS" | grep -qi "enabled"; then
+        echo "  OK: Secure Boot is enabled"
+    else
+        echo "  FAIL: Secure Boot is not enabled"
+        exit 1
+    fi
+
     echo "--- root mount ---"
     mount | grep " / " || true
     if mount | grep -q "verity=require"; then
@@ -494,6 +504,16 @@ aws-test: aws-launch
 
     echo "--- kernel ---"
     uname -r
+
+    echo "--- secure boot ---"
+    SB_STATUS=$(bootctl status 2>/dev/null | grep -i "Secure Boot" | head -1 || true)
+    echo "  $SB_STATUS"
+    if echo "$SB_STATUS" | grep -qi "enabled"; then
+        echo "  OK: Secure Boot is enabled"
+    else
+        echo "  FAIL: Secure Boot is not enabled"
+        exit 1
+    fi
 
     echo "--- root mount ---"
     mount | grep " / " || true
