@@ -5,7 +5,7 @@
 #
 # Prerequisites: podman, openssl, just
 # For VM testing (local): bcvk (from bootc-dev/bcvk), virt-firmware (pip)
-# For AWS testing: aws CLI, jq, bcvk, efitools, python-uefivars
+# For AWS testing: aws CLI, jq, bcvk, coldsnap, efitools, python-uefivars
 #                  See README-AWS.md for full details.
 
 # Local image name
@@ -121,7 +121,7 @@ clean:
 # See README-AWS.md for prerequisites and environment variables.
 #
 # Recipe chain:
-#   aws-test -> aws-launch -> aws-register -> aws-import -> aws-upload
+#   aws-test -> aws-launch -> aws-register -> aws-snapshot
 #                -> aws-disk -> aws-build -> _check-aws-deps
 #
 # Each step is idempotent: it checks for its output before doing work,
@@ -146,7 +146,7 @@ _check-aws-deps:
     set -euo pipefail
     missing=()
 
-    for cmd in aws jq bcvk cert-to-efi-sig-list uefivars; do
+    for cmd in aws jq bcvk coldsnap cert-to-efi-sig-list uefivars; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -159,15 +159,17 @@ _check-aws-deps:
         for cmd in "${missing[@]}"; do
             case "$cmd" in
                 aws)
-                    echo "  aws             - https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2 ;;
+                    echo "  aws               - https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2 ;;
                 jq)
-                    echo "  jq              - dnf install jq" >&2 ;;
+                    echo "  jq                - dnf install jq" >&2 ;;
                 bcvk)
-                    echo "  bcvk            - https://github.com/bootc-dev/bcvk" >&2 ;;
+                    echo "  bcvk              - https://github.com/bootc-dev/bcvk" >&2 ;;
+                coldsnap)
+                    echo "  coldsnap          - cargo install --locked coldsnap (requires cargo: dnf install cargo)" >&2 ;;
                 cert-to-efi-sig-list)
                     echo "  cert-to-efi-sig-list - dnf install efitools" >&2 ;;
                 uefivars)
-                    echo "  uefivars        - pip install git+https://github.com/awslabs/python-uefivars.git" >&2 ;;
+                    echo "  uefivars          - pip install git+https://github.com/awslabs/python-uefivars.git (requires pip: dnf install python3-pip)" >&2 ;;
             esac
         done
         echo "" >&2
@@ -253,95 +255,9 @@ aws-disk: aws-build
         "{{aws_host_image}}" "$DISK"
     echo "Disk image created: $DISK"
 
-# Upload the raw disk image to S3.
-aws-upload: aws-disk
-    #!/bin/bash
-    set -euo pipefail
-
-    DISK="target/aws-disk.raw"
-    S3_KEY="sealed-host.raw"
-    CREATED_BUCKET=""
-
-    # Determine the AWS region
-    REGION="${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}"
-    if [ -z "$REGION" ]; then
-        echo "ERROR: No AWS region configured. Set AWS_REGION or run 'aws configure'." >&2
-        exit 1
-    fi
-
-    # Check if we already uploaded (state file has s3_bucket and s3_key)
-    EXISTING_BUCKET=$(jq -r '.s3_bucket // empty' "{{aws_state}}" 2>/dev/null || true)
-    EXISTING_KEY=$(jq -r '.s3_key // empty' "{{aws_state}}" 2>/dev/null || true)
-    if [ -n "$EXISTING_BUCKET" ] && [ -n "$EXISTING_KEY" ]; then
-        if aws s3api head-object --bucket "$EXISTING_BUCKET" --key "$EXISTING_KEY" --region "$REGION" &>/dev/null; then
-            echo "S3 object already exists: s3://${EXISTING_BUCKET}/${EXISTING_KEY} (skipping)"
-            exit 0
-        fi
-    fi
-
-    # Determine the S3 bucket
-    BUCKET="${AWS_S3_BUCKET:-}"
-    if [ -z "$BUCKET" ]; then
-        BUCKET="sealed-bootc-test-$(head -c 8 /dev/urandom | xxd -p)"
-        echo "==> Creating ephemeral S3 bucket: $BUCKET"
-        if [ "$REGION" = "us-east-1" ]; then
-            aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"
-        else
-            aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-                --create-bucket-configuration LocationConstraint="$REGION"
-        fi
-        CREATED_BUCKET="true"
-    else
-        echo "==> Using provided S3 bucket: $BUCKET"
-        CREATED_BUCKET="false"
-    fi
-
-    # Record bucket info in state
-    just _aws-state-set s3_bucket "$BUCKET"
-    just _aws-state-set s3_key "$S3_KEY"
-    just _aws-state-set s3_bucket_created "$CREATED_BUCKET"
-    just _aws-state-set aws_region "$REGION"
-
-    # Grant the vmimport role access to the bucket so import-snapshot works.
-    ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-    echo "==> Applying bucket policy to allow vmimport role access..."
-    POLICY=$(cat <<EOPOLICY
-    {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Sid": "AllowVMImportAccess",
-          "Effect": "Allow",
-          "Principal": {
-            "AWS": "arn:aws:iam::${ACCOUNT_ID}:role/vmimport"
-          },
-          "Action": [
-            "s3:GetObject",
-            "s3:GetBucketLocation"
-          ],
-          "Resource": [
-            "arn:aws:s3:::${BUCKET}",
-            "arn:aws:s3:::${BUCKET}/*"
-          ]
-        }
-      ]
-    }
-    EOPOLICY
-    )
-    if aws s3api put-bucket-policy --bucket "$BUCKET" --region "$REGION" \
-           --policy "$POLICY" 2>/dev/null; then
-        echo "  Bucket policy applied."
-    else
-        echo "  WARNING: Could not apply bucket policy (you may lack s3:PutBucketPolicy permission)." >&2
-        echo "  If using AWS_S3_BUCKET, ensure the vmimport role has access. See README-AWS.md." >&2
-    fi
-
-    echo "==> Uploading disk image to s3://${BUCKET}/${S3_KEY}..."
-    aws s3 cp "$DISK" "s3://${BUCKET}/${S3_KEY}" --region "$REGION"
-    echo "Upload complete."
-
-# Import the disk image from S3 as an EBS snapshot.
-aws-import: aws-upload
+# Upload the raw disk image directly as an EBS snapshot using coldsnap.
+# This uses the EBS direct APIs, bypassing S3 and the vmimport IAM role.
+aws-snapshot: aws-disk
     #!/bin/bash
     set -euo pipefail
 
@@ -359,64 +275,27 @@ aws-import: aws-upload
             echo "Snapshot ready: $EXISTING_SNAP"
             exit 0
         fi
-        # If missing or error, fall through to create a new one
     fi
 
-    BUCKET=$(jq -r '.s3_bucket' "{{aws_state}}")
-    S3_KEY=$(jq -r '.s3_key' "{{aws_state}}")
-    REGION=$(jq -r '.aws_region' "{{aws_state}}")
-
-    # Ensure the vmimport role exists (we check, but don't create it)
-    if ! aws iam get-role --role-name vmimport &>/dev/null; then
-        echo "ERROR: IAM role 'vmimport' not found." >&2
-        echo "This role is required by AWS VM Import/Export." >&2
-        echo "See README-AWS.md for setup instructions." >&2
+    # Determine the AWS region
+    REGION="${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}"
+    if [ -z "$REGION" ]; then
+        echo "ERROR: No AWS region configured. Set AWS_REGION or run 'aws configure'." >&2
         exit 1
     fi
+    just _aws-state-set aws_region "$REGION"
 
-    echo "==> Importing snapshot from s3://${BUCKET}/${S3_KEY}..."
-    IMPORT_TASK=$(aws ec2 import-snapshot \
-        --region "$REGION" \
-        --description "sealed-bootc-test" \
-        --disk-container "Format=RAW,UserBucket={S3Bucket=${BUCKET},S3Key=${S3_KEY}}" \
-        --output json)
-
-    TASK_ID=$(echo "$IMPORT_TASK" | jq -r '.ImportTaskId')
-    echo "Import task started: $TASK_ID"
-    just _aws-state-set import_task_id "$TASK_ID"
-
-    # Poll until complete
-    echo "Waiting for snapshot import to complete (this may take several minutes)..."
-    while true; do
-        STATUS_JSON=$(aws ec2 describe-import-snapshot-tasks \
-            --region "$REGION" \
-            --import-task-ids "$TASK_ID" \
-            --output json)
-        STATUS=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.Status')
-        PROGRESS=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.Progress // "0"')
-        STATUS_MSG=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.StatusMessage // ""')
-
-        case "$STATUS" in
-            completed)
-                SNAP_ID=$(echo "$STATUS_JSON" | jq -r '.ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId')
-                echo "Snapshot import complete: $SNAP_ID"
-                just _aws-state-set snapshot_id "$SNAP_ID"
-                break
-                ;;
-            active)
-                echo "  Progress: ${PROGRESS}% - ${STATUS_MSG}"
-                sleep 15
-                ;;
-            *)
-                echo "ERROR: Import failed with status: $STATUS" >&2
-                echo "$STATUS_JSON" | jq '.' >&2
-                exit 1
-                ;;
-        esac
-    done
+    DISK="target/aws-disk.raw"
+    echo "==> Uploading disk image as EBS snapshot via coldsnap..."
+    # Export credentials so coldsnap's Rust SDK can use them regardless of
+    # how the user authenticated (SSO, assume-role, env vars, etc.).
+    eval $(aws configure export-credentials --format env)
+    SNAP_ID=$(coldsnap --region "$REGION" upload --wait "$DISK")
+    echo "Snapshot created: $SNAP_ID"
+    just _aws-state-set snapshot_id "$SNAP_ID"
 
 # Register an AMI from the imported snapshot with UEFI Secure Boot keys.
-aws-register: aws-import
+aws-register: aws-snapshot
     #!/bin/bash
     set -euo pipefail
 
@@ -697,20 +576,7 @@ aws-clean:
         done
     fi
 
-    # 6. Delete S3 object and ephemeral bucket
-    S3_BUCKET=$(jq -r '.s3_bucket // empty' "$STATE")
-    S3_KEY=$(jq -r '.s3_key // empty' "$STATE")
-    if [ -n "$S3_BUCKET" ] && [ -n "$S3_KEY" ]; then
-        echo "  Deleting S3 object: s3://${S3_BUCKET}/${S3_KEY}"
-        aws s3 rm "s3://${S3_BUCKET}/${S3_KEY}" --region "$REGION" 2>/dev/null || true
-    fi
-    S3_CREATED=$(jq -r '.s3_bucket_created // "false"' "$STATE")
-    if [ "$S3_CREATED" = "true" ] && [ -n "$S3_BUCKET" ]; then
-        echo "  Deleting ephemeral S3 bucket: $S3_BUCKET"
-        aws s3 rb "s3://${S3_BUCKET}" --region "$REGION" 2>/dev/null || true
-    fi
-
-    # 7. Clean up local artifacts
+    # 6. Clean up local artifacts
     rm -f target/aws-ssh-key.pem target/aws-disk.raw target/uefi-data.bin
     rm -f "$STATE"
     echo "AWS cleanup complete."
