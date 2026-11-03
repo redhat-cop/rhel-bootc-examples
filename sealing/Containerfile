@@ -178,6 +178,8 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
 # ---------------------------------------------------------------------------
 # FROM tools so ukify, sbsign, and all their deps are natively available.
 # The penultimate tree is mounted read-only; the sealer never modifies it.
+# We run the target's bootc (not the tools image's) to compute the composefs
+# digest, ensuring it matches what bootc install will expect at deploy time.
 FROM tools AS sealer
 ARG console_kargs
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
@@ -186,7 +188,7 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
     --mount=type=secret,id=secureboot_cert <<EORUN
 set -xeuo pipefail
 mkdir -p /out
-bootc container ukify --rootfs /target \
+/target/usr/bin/bootc container ukify --rootfs /target \
   --karg rw \
   --karg ${console_kargs} \
   --karg systemd.journald.forward_to_console=1 \
@@ -212,7 +214,7 @@ EORUN
 # Run the linter against the sealed tree.
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,from=penultimate,target=/target \
-    bootc container lint --rootfs /target --fatal-warnings
+    /target/usr/bin/bootc container lint --rootfs /target --fatal-warnings
 
 # ---------------------------------------------------------------------------
 # Final image: clean sealed rootfs + the signed UKI in /boot
