@@ -1,19 +1,20 @@
 # Sealed bootc on AWS EC2
 
 This document describes how to test a sealed bootc image on AWS EC2 with
-UEFI Secure Boot.  The flow builds a disk image locally, uploads it to
-AWS, registers it as an AMI with custom UEFI Secure Boot keys, launches
-an EC2 instance, and verifies that the root filesystem is mounted as
-composefs with `verity=require`.
+UEFI Secure Boot.  The flow builds a disk image locally, uploads it
+directly as an EBS snapshot, registers it as an AMI with custom UEFI
+Secure Boot keys, launches an EC2 instance, and verifies that the root
+filesystem is mounted as composefs with `verity=require`.
 
 ## Quick start
 
 ```bash
+just keygen
 just aws-test
 ```
 
-This runs the full chain: build, create disk, upload to S3, import
-snapshot, register AMI with UEFI Secure Boot keys, launch instance,
+This runs the full chain: build, create disk, upload snapshot via
+coldsnap, register AMI with UEFI Secure Boot keys, launch instance,
 verify composefs, and clean up all AWS resources.
 
 ## Prerequisites
@@ -25,14 +26,36 @@ verify composefs, and clean up all AWS resources.
 | `aws` | AWS CLI | [Install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | `jq` | JSON processing | `dnf install jq` |
 | `bcvk` | Disk image creation | [github.com/bootc-dev/bcvk](https://github.com/bootc-dev/bcvk) |
+| `coldsnap` | Upload disk images as EBS snapshots | `cargo install --locked coldsnap` (requires `cargo`: `dnf install cargo`) |
 | `cert-to-efi-sig-list` | Convert PEM certs to EFI Signature Lists | `dnf install efitools` |
-| `uefivars` | Generate AWS UEFI variable store blobs | `pip install git+https://github.com/awslabs/python-uefivars.git` |
+| `uefivars` | Generate AWS UEFI variable store blobs | `pip install git+https://github.com/awslabs/python-uefivars.git` (requires `pip`: `dnf install python3-pip`) |
 | `podman` | Container image build | `dnf install podman` |
 | `openssl` | Key generation | `dnf install openssl` |
 
 The `just _check-aws-deps` recipe (run automatically at the start of
 every AWS recipe) will verify all tools are present and provide install
 hints for any that are missing.
+
+### Red Hat subscription
+
+The image build pulls packages from RHEL repositories inside the
+container.  Podman passes the host's entitlement certificates into
+builds automatically, but this only works if the build host is
+registered with a Red Hat subscription.  A
+[no-cost developer subscription](https://developers.redhat.com/register)
+is sufficient.
+
+On a Fedora build host, install `subscription-manager`, register, and
+verify:
+
+```bash
+sudo dnf install subscription-manager
+sudo subscription-manager register
+podman run --rm registry.redhat.io/rhel10/rhel-bootc:10.2 dnf repolist
+```
+
+If the `dnf repolist` output shows RHEL repositories, the entitlements
+are in place.
 
 ### AWS credentials
 
@@ -44,84 +67,6 @@ profile, etc.).  Verify with:
 aws sts get-caller-identity
 ```
 
-### IAM: the `vmimport` service role
-
-AWS VM Import/Export requires an IAM role named `vmimport` in your account.
-This is a **one-time per-account setup** -- the recipes will not create it
-for you.  It may already exist if anyone in your AWS organization has
-previously used VM Import/Export.  Check with:
-
-```bash
-aws iam get-role --role-name vmimport
-```
-
-If the role exists, skip this section.  If not, create it:
-
-1. Create `trust-policy.json`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": { "Service": "vmie.amazonaws.com" },
-      "Action": "sts:AssumeRole",
-      "Condition": {
-        "StringEquals": {
-          "sts:Externalid": "vmimport"
-        }
-      }
-    }
-  ]
-}
-```
-
-2. Create the role:
-
-```bash
-aws iam create-role --role-name vmimport \
-    --assume-role-policy-document file://trust-policy.json
-```
-
-3. Create `role-policy.json`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:ModifySnapshotAttribute",
-        "ec2:CopySnapshot",
-        "ec2:RegisterImage",
-        "ec2:Describe*"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-4. Attach the policy:
-
-```bash
-aws iam put-role-policy --role-name vmimport \
-    --policy-name vmimport \
-    --policy-document file://role-policy.json
-```
-
-**Note:** S3 access for the `vmimport` role is handled automatically by
-the `aws-upload` recipe, which applies a bucket policy granting the role
-`s3:GetObject` and `s3:GetBucketLocation` on the upload bucket.  If you
-provide your own bucket via `AWS_S3_BUCKET`, the calling IAM user needs
-`s3:PutBucketPolicy` permission on that bucket, or you must configure
-access to the bucket for the `vmimport` role yourself.
-
-For full details see the
-[AWS VM Import/Export documentation](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html#vmimport-role).
-
 ## Environment variables
 
 All environment variables are optional.  Sensible defaults are used when
@@ -130,7 +75,6 @@ they are not set.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AWS_REGION` | From `aws configure get region` | AWS region for all operations |
-| `AWS_S3_BUCKET` | Auto-create ephemeral bucket | S3 bucket for disk image upload.  If not set, a temporary bucket is created and destroyed during cleanup. |
 | `AWS_INSTANCE_TYPE` | `m5.large` | EC2 instance type (must support UEFI boot mode) |
 | `AWS_SUBNET_ID` | First default subnet | Subnet to launch the instance in |
 | `AWS_SECURITY_GROUP_ID` | Auto-create ephemeral SG | Security group with SSH access.  If not set, a temporary SG is created in the default VPC. |
@@ -145,21 +89,19 @@ point of failure.
 
 ```
 aws-test
-  \-- aws-launch         Launch instance, wait for SSH
-        \-- aws-register  Register AMI with UEFI Secure Boot keys
-              \-- aws-import   Import EBS snapshot from S3
-                    \-- aws-upload  Upload raw disk to S3
-                          \-- aws-disk   Create raw disk via bcvk to-disk
-                                \-- aws-build  Build AWS container image
-                                      \-- _check-aws-deps
+  \-- aws-launch           Launch instance, wait for SSH
+        \-- aws-register    Register AMI with UEFI Secure Boot keys
+              \-- aws-snapshot  Upload raw disk as EBS snapshot via coldsnap
+                    \-- aws-disk     Create raw disk via bcvk to-disk
+                          \-- aws-build   Build AWS container image
+                                \-- _check-aws-deps
 ```
 
 | Recipe | Description |
 |--------|-------------|
 | `just aws-build` | Build the sealed container image with `cloud-init` and `ttyS0` console |
 | `just aws-disk` | Create a raw disk image from the container image |
-| `just aws-upload` | Upload the disk image to S3 |
-| `just aws-import` | Import the S3 object as an EBS snapshot |
+| `just aws-snapshot` | Upload the disk image directly as an EBS snapshot via coldsnap |
 | `just aws-register` | Generate UEFI variable store blob and register an AMI |
 | `just aws-launch` | Create key pair, security group, and launch an EC2 instance |
 | `just aws-ssh` | Open an interactive SSH session to the running instance |
@@ -176,10 +118,10 @@ just aws-disk
 # output: target/aws-disk.raw
 ```
 
-Or to upload and import without launching:
+Or to create the snapshot without launching:
 
 ```bash
-just aws-import
+just aws-snapshot
 ```
 
 ### Manual cleanup
@@ -208,6 +150,16 @@ The AWS image is built from the same Containerfile with two overrides:
 These arguments are baked into the signed UKI at build time, so the AWS
 image has a different composefs digest than the local image.
 
+### Snapshot upload with coldsnap
+
+The raw disk image is uploaded directly as an EBS snapshot using
+[coldsnap](https://github.com/awslabs/coldsnap), a CLI tool from AWS
+Labs that uses the EBS direct APIs (`ebs:StartSnapshot`,
+`ebs:PutSnapshotBlock`, `ebs:CompleteSnapshot`).  This bypasses the
+traditional VM Import/Export path (`aws ec2 import-snapshot`), which
+requires an S3 bucket, the `vmimport` IAM service role, and
+`iam:PassRole` permission -- none of which are needed with coldsnap.
+
 ### UEFI Secure Boot on EC2
 
 EC2 supports UEFI Secure Boot, but the custom keys used to sign our
@@ -230,28 +182,17 @@ This follows
 
 All created AWS resources are tracked in `target/aws-resources.json`.
 This file maps resource types to their IDs and records whether ephemeral
-resources (S3 bucket, security group) were created by the recipes or
-provided by the user.  The `aws-clean` recipe reads this file to
-determine what to tear down.
+resources (security group) were created by the recipes or provided by
+the user.  The `aws-clean` recipe reads this file to determine what to
+tear down.
 
 ## Troubleshooting
-
-### "IAM role 'vmimport' not found"
-
-You need to create the vmimport service role.  See the
-[IAM setup section](#iam-the-vmimport-service-role) above.
 
 ### "No default VPC found"
 
 Your AWS account does not have a default VPC in the configured region.
 Either create one or set `AWS_SECURITY_GROUP_ID` and `AWS_SUBNET_ID` to
 point to existing resources.
-
-### Snapshot import is slow
-
-The `import-snapshot` step typically takes 5-15 minutes depending on disk
-image size and AWS region load.  The recipe polls every 15 seconds and
-prints progress.
 
 ### SSH timeout
 
