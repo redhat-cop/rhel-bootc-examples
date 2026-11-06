@@ -83,37 +83,9 @@ bcvk-test: bcvk-boot
     trap 'echo "==> Cleaning up VM..."; bcvk libvirt rm --stop --force "${VM_NAME}"; echo "Done."' EXIT
 
     echo "==> Running checks..."
-    bcvk libvirt ssh "${VM_NAME}" -- bash -s <<'EOF'
-    set -euo pipefail
-
-    echo "--- kernel ---"
-    uname -r
-
-    echo "--- secure boot ---"
-    SB_STATUS=$(bootctl status 2>/dev/null | grep -i "Secure Boot" | head -1 || true)
-    echo "  $SB_STATUS"
-    if echo "$SB_STATUS" | grep -qi "enabled"; then
-        echo "  OK: Secure Boot is enabled"
-    else
-        echo "  FAIL: Secure Boot is not enabled"
-        exit 1
-    fi
-
-    echo "--- root mount ---"
-    mount | grep " / " || true
-    if mount | grep -q "verity=require"; then
-        echo "  OK: composefs root with verity=require"
-    else
-        echo "  FAIL: composefs root not detected"
-        exit 1
-    fi
-
-    echo "--- cmdline ---"
-    cat /proc/cmdline
-
-    echo ""
-    echo "=== COMPOSEFS BOOT VERIFIED ==="
-    EOF
+    # bcvk libvirt ssh doesn't forward stdin, so pass the script as an argument
+    # (bcvk shell-escapes it for the remote shell).
+    bcvk libvirt ssh "${VM_NAME}" -- bash -c "$(cat util/verify-boot.sh)"
 
 # Clean generated artifacts and VM
 clean:
@@ -499,37 +471,7 @@ aws-test: aws-launch
     echo "==> Running checks on ${PUBLIC_IP}..."
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -i "$KEY_FILE" \
-        "{{aws_ssh_user}}@${PUBLIC_IP}" bash -s <<'EOF'
-    set -euo pipefail
-
-    echo "--- kernel ---"
-    uname -r
-
-    echo "--- secure boot ---"
-    SB_STATUS=$(bootctl status 2>/dev/null | grep -i "Secure Boot" | head -1 || true)
-    echo "  $SB_STATUS"
-    if echo "$SB_STATUS" | grep -qi "enabled"; then
-        echo "  OK: Secure Boot is enabled"
-    else
-        echo "  FAIL: Secure Boot is not enabled"
-        exit 1
-    fi
-
-    echo "--- root mount ---"
-    mount | grep " / " || true
-    if mount | grep -q "verity=require"; then
-        echo "  OK: composefs root with verity=require"
-    else
-        echo "  FAIL: composefs root not detected"
-        exit 1
-    fi
-
-    echo "--- cmdline ---"
-    cat /proc/cmdline
-
-    echo ""
-    echo "=== COMPOSEFS BOOT VERIFIED (AWS) ==="
-    EOF
+        "{{aws_ssh_user}}@${PUBLIC_IP}" bash -s < util/verify-boot.sh
 
 # Tear down all AWS resources tracked in the state file.
 aws-clean:
