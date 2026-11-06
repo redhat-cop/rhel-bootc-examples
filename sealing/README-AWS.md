@@ -38,24 +38,8 @@ hints for any that are missing.
 
 ### Red Hat subscription
 
-The image build pulls packages from RHEL repositories inside the
-container.  Podman passes the host's entitlement certificates into
-builds automatically, but this only works if the build host is
-registered with a Red Hat subscription.  A
-[no-cost developer subscription](https://developers.redhat.com/register)
-is sufficient.
-
-On a Fedora build host, install `subscription-manager`, register, and
-verify:
-
-```bash
-sudo dnf install subscription-manager
-sudo subscription-manager register
-podman run --rm registry.redhat.io/rhel10/rhel-bootc:10.2 dnf repolist
-```
-
-If the `dnf repolist` output shows RHEL repositories, the entitlements
-are in place.
+The image build needs RHEL content: see
+[Prerequisites](README.md#prerequisites) in the main README.
 
 ### AWS credentials
 
