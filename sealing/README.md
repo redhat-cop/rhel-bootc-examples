@@ -11,6 +11,28 @@ This example builds a RHEL 10.2 Image Mode system that boots with the
 Note that this support is Tech Preview in RHEL 10.2. But we are interested
 in feedback.
 
+## Prerequisites
+
+- `podman`, `just`, `openssl` and `python3` (for `just keygen`) to
+  build; for the local VM, also [bcvk](https://github.com/bootc-dev/bcvk)
+  and `virt-fw-vars` (`dnf install python3-virt-firmware`), which bcvk
+  uses to enroll the Secure Boot keys.
+- Access to RHEL content. The base image comes from `registry.redhat.io`,
+  so log in first (`podman login registry.redhat.io`), and the build runs
+  `dnf` inside it, which needs the build host to be registered with a Red
+  Hat subscription: podman passes the host's entitlement certificates into
+  the build. A
+  [no-cost developer subscription](https://developers.redhat.com/register)
+  is sufficient. Without it the build finds no enabled repositories and
+  fails. On a Fedora build host, install `subscription-manager`
+  and register (`sudo subscription-manager register`). To check:
+
+  ```sh
+  podman run --rm registry.redhat.io/rhel10/rhel-bootc:10.2 dnf repolist
+  ```
+
+  If the output lists RHEL repositories, the entitlements are in place.
+
 ## Quick start with bcvk
 
 ### 1. Generate Secure Boot keys
@@ -68,15 +90,15 @@ bcvk libvirt rm --stop --force sealed-demo
 ```
 Build time
 ├── Containerfile
-│     ├── Install packages (systemd-boot, sbsigntools, systemd-ukify)
-│     ├── Sign systemd-boot with db key (secret: db.key, public: keys/db.crt)
-│     ├── Rebuild initramfs with bootc dracut module
-│     └── FROM scratch flatten (deterministic composefs digest)
-├── bootc container ukify
-│     ├── Compute composefs SHA-512 digest from flattened rootfs
+│     ├── Compose the rootfs from scratch (bootc-base-imagectl build-rootfs)
+│     ├── Swap bootupd and shim for systemd-boot-unsigned
+│     ├── Sign systemd-boot with db key (systemd-sbsign; secrets: db key + cert)
+│     └── Scrub /var so the tree is ready to seal
+├── bootc container ukify (the target's own bootc, ukify from a tools stage)
+│     ├── Compute composefs SHA-512 digest from the sealed tree
 │     ├── Embed digest + kargs in UKI command line
 │     └── Sign UKI with db key
-└── COPY --from=kernel /boot /boot
+└── COPY --from=sealer /out/boot /boot
 
 Boot time (UEFI → systemd-boot → UKI → composefs)
 ├── UEFI verifies systemd-boot signature against enrolled db cert
