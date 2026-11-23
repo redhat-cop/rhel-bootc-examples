@@ -1,0 +1,13 @@
+# Kernel arguments of the stock tuned `realtime` profile (which includes `network-latency`) for
+# isolated_cores=2-3, isolate_managed_irq=Y, on an Intel host. Baked into the image because tuned 2.27
+# (RHEL 10.2) has no bootc-aware bootloader plugin: left to itself it appends these via `rpm-ostree kargs`
+# as a local deployment, producing a duplicate isolcpus on the next boot — silently.
+#
+# COMPLETE OR ABSENT: tuned 2.27 computes "profile kargs minus what's already on the command line" and
+# appends only the remainder. A file that covers ALL of them makes tuned a no-op; a file that covers SOME
+# makes tuned append the missing ones — a duplicate, which is worse than no file at all. Regenerate this
+# list whenever realtime-variables.conf changes; see README.md for how.
+#
+# intel_pstate=disable is Intel-specific: the profile expands disable_pstate via a cpuinfo check, and an
+# AMD host needs amd_pstate=disable instead.
+kargs = ["skew_tick=1", "tsc=reliable", "rcupdate.rcu_normal_after_boot=1", "rcutree.nohz_full_patience_delay=1000", "isolcpus=managed_irq,domain,2-3", "intel_pstate=disable", "nosoftlockup"]
