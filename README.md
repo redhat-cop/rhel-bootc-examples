@@ -62,6 +62,13 @@ As a result, this example repository focuses on two things:
   location; this writes a pull secret to a central location embedded in the container
   (underneath `/usr` as part of the immutable state).
 
+### Real-time
+
+- [rhel-rt](rhel-rt) - Real-time RHEL 10.2: swaps in `kernel-rt` and applies the stock tuned
+  `realtime` profile. tuned 2.27 has no bootc-aware bootloader path and will write the profile's
+  kernel arguments as a local deployment, so this bakes them into `/usr/lib/bootc/kargs.d` instead.
+  *Note: scoped to RHEL 10.2; see the example's "Open questions" for the 10.3 / tuned 2.28 situation.*
+
 ### Cloud and virtualization
 
 - [aws](aws) - AWS: adds cloud-init for instance metadata (SSH keys, etc.)

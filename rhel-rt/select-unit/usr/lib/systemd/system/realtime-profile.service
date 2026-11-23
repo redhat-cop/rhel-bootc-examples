@@ -1,0 +1,12 @@
+[Unit]
+Description=Select the tuned realtime profile (an image copy of active_profile loses to the local one in the /etc merge)
+After=tuned.service
+Requires=tuned.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'tuned-adm active | grep -q "profile: realtime$" || tuned-adm profile realtime'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
